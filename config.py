@@ -1,27 +1,45 @@
 """
 Загрузка конфигурации из .env-файла через python-dotenv.
+Системные промпты читаются из файлов в папке prompts/.
 """
 
+import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
-import os
 
 # Загружаем переменные окружения из файла .env
 load_dotenv()
+
+
+def load_prompt(filename: str) -> str:
+    """Загружает системный промпт из файла в папке prompts/"""
+    path = os.path.join(os.path.dirname(__file__), "prompts", filename)
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+# Максимальный размер входящего текста в символах
+MAX_CHARS_CONTRACT = 20000
+MAX_CHARS_HTML = 20000
+
+# Промпты загружаются из файлов один раз при старте приложения
+CONTRACT_CHECK_PROMPT = load_prompt("contract_check.txt")
+HTML_FORMAT_PROMPT = load_prompt("html_format.txt")
 
 
 @dataclass
 class Settings:
     bot_token: str
     openai_api_key: str
-    system_prompt: str
+    openai_model: str
 
 
 def _load_settings() -> Settings:
     bot_token = os.getenv("BOT_TOKEN")
     openai_api_key = os.getenv("OPENAI_API_KEY")
-    system_prompt = os.getenv("SYSTEM_PROMPT", "Ты — помощник по проверке договоров.")
+    # Модель OpenAI — берётся из .env, по умолчанию gpt-4o-mini
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     if not bot_token:
         raise ValueError("Переменная окружения BOT_TOKEN не задана")
@@ -31,7 +49,7 @@ def _load_settings() -> Settings:
     return Settings(
         bot_token=bot_token,
         openai_api_key=openai_api_key,
-        system_prompt=system_prompt,
+        openai_model=openai_model,
     )
 
 

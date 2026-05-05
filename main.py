@@ -8,6 +8,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import settings
 from handlers import contract
@@ -27,8 +28,8 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Создание диспетчера
-    dp = Dispatcher()
+    # Создание диспетчера с хранилищем состояний в памяти (для FSM)
+    dp = Dispatcher(storage=MemoryStorage())
 
     # Регистрация роутеров
     dp.include_router(contract.router)
