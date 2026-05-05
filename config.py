@@ -13,8 +13,11 @@ load_dotenv()
 
 
 def load_prompt(filename: str) -> str:
-    """Загружает системный промпт из файла в папке prompts/"""
+    """Загружает системный промпт из файла в папке prompts/.
+    Если файл не найден — возвращает пустую строку."""
     path = os.path.join(os.path.dirname(__file__), "prompts", filename)
+    if not os.path.exists(path):
+        return ""
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
 
