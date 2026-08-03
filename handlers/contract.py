@@ -31,8 +31,6 @@ keyboard = ReplyKeyboardMarkup(
 
 # Роутер для группировки хендлеров
 router = Router()
-router.message.middleware(AuthMiddleware())
-router.callback_query.middleware(AuthMiddleware())
 
 
 class UserStates(StatesGroup):
@@ -72,6 +70,10 @@ class AuthMiddleware(BaseMiddleware):
         await state.set_state(UserStates.waiting_password)
         await event.answer("🔒 Бот защищён паролем. Введите пароль для доступа:")
         return None
+
+
+router.message.middleware(AuthMiddleware())
+router.callback_query.middleware(AuthMiddleware())
 
 
 def get_model_keyboard() -> InlineKeyboardMarkup:
