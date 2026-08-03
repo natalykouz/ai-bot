@@ -274,8 +274,12 @@ async def cmd_getprompt(message: Message) -> None:
     """
     Скрытая команда для получения текущего промпта в виде файла.
     Принимает аргумент: contract или html.
+    Доступна только админам.
     Пример: /getprompt contract
     """
+    if not auth_service.is_admin(message.from_user.id):
+        return
+
     args = message.text.split()
     if len(args) < 2 or args[1] not in ("contract", "html"):
         await message.answer("Использование: /getprompt contract или /getprompt html")
@@ -301,8 +305,12 @@ async def cmd_setprompt(message: Message, state: FSMContext) -> None:
     """
     Скрытая команда для обновления промптов на лету.
     Принимает аргумент: contract или html.
+    Доступна только админам.
     Пример: /setprompt contract
     """
+    if not auth_service.is_admin(message.from_user.id):
+        return
+
     args = message.text.split()
     if len(args) < 2 or args[1] not in ("contract", "html"):
         await message.answer("Использование: /setprompt contract или /setprompt html")
