@@ -5,18 +5,20 @@
 
 import io
 import os
+from typing import Any, Awaitable, Callable, Dict, Union
 
-from aiogram import Bot, Router, F
+from aiogram import BaseMiddleware, Bot, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, TelegramObject,
 )
 
 from services.openai_service import analyze_contract
 from services.html_service import analyze_html
+from services import auth_service
 
 # Клавиатура главного меню
 keyboard = ReplyKeyboardMarkup(
@@ -29,6 +31,8 @@ keyboard = ReplyKeyboardMarkup(
 
 # Роутер для группировки хендлеров
 router = Router()
+router.message.middleware(AuthMiddleware())
+router.callback_query.middleware(AuthMiddleware())
 
 
 class UserStates(StatesGroup):
@@ -37,6 +41,37 @@ class UserStates(StatesGroup):
     waiting_html = State()
     waiting_new_prompt = State()   # ожидание нового текста промпта от администратора
     waiting_model_choice = State() # ожидание выбора модели перед анализом договора
+    waiting_password = State()     # ожидание ввода пароля для доступа к боту
+
+
+class AuthMiddleware(BaseMiddleware):
+    """
+    Закрывает доступ к любым хендлерам, пока пользователь не введёт пароль.
+    Админы (см. services/auth_service.py) и уже допущенные пользователи проходят без проверки.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: Union[Message, CallbackQuery],
+        data: Dict[str, Any],
+    ) -> Any:
+        user_id = event.from_user.id
+
+        if auth_service.is_allowed(user_id):
+            return await handler(event, data)
+
+        state: FSMContext = data["state"]
+        if await state.get_state() == UserStates.waiting_password.state:
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery):
+            await event.answer("Нет доступа. Отправьте /start и введите пароль.", show_alert=True)
+            return None
+
+        await state.set_state(UserStates.waiting_password)
+        await event.answer("🔒 Бот защищён паролем. Введите пароль для доступа:")
+        return None
 
 
 def get_model_keyboard() -> InlineKeyboardMarkup:
@@ -53,11 +88,38 @@ def get_model_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+ADMIN_INFO_TEXT = (
+    "👑 Вы являетесь администратором бота.\n\n"
+    "<b>Команды администратора:</b>\n\n"
+    "Сменить пароль доступа к боту:\n"
+    "<code>/setpassword новый_пароль</code>\n\n"
+    "Скачать текущий промпт:\n"
+    "<code>/getprompt contract</code>\n"
+    "<code>/getprompt html</code>\n\n"
+    "Загрузить новый промпт:\n"
+    "<code>/setprompt contract</code>\n"
+    "<code>/setprompt html</code>"
+)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     """Сбрасывает состояние и отправляет главное меню с клавиатурой."""
     await state.clear()
+    if auth_service.is_admin(message.from_user.id):
+        await message.answer(ADMIN_INFO_TEXT)
     await message.answer("Выберите действие:", reply_markup=keyboard)
+
+
+@router.message(UserStates.waiting_password)
+async def handle_password(message: Message, state: FSMContext) -> None:
+    """Проверяет введённый пароль и открывает доступ пользователю при совпадении."""
+    if message.text and auth_service.check_password(message.text.strip()):
+        auth_service.grant_access(message.from_user.id)
+        await state.clear()
+        await message.answer("✅ Доступ разрешён.", reply_markup=keyboard)
+    else:
+        await message.answer("❌ Неверный пароль. Попробуйте ещё раз.")
 
 
 @router.message(Command("help"))
@@ -177,6 +239,32 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     """Сбрасывает текущее состояние FSM и отменяет любое ожидаемое действие."""
     await state.clear()
     await message.answer("Действие отменено.")
+
+
+@router.message(Command("setpassword"))
+async def cmd_setpassword(message: Message, bot: Bot) -> None:
+    """
+    Скрытая команда для смены пароля доступа к боту. Доступна только админам
+    (см. ADMIN_IDS / data/auth.json). Не требует правки кода или .env.
+    Пример: /setpassword новый_пароль
+    """
+    if not auth_service.is_admin(message.from_user.id):
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2 or not args[1].strip():
+        await message.answer("Использование: /setpassword <новый пароль>")
+        return
+
+    auth_service.set_password(args[1].strip())
+
+    # Удаляем сообщение с открытым текстом пароля из чата
+    try:
+        await bot.delete_message(message.chat.id, message.message_id)
+    except Exception:
+        pass
+
+    await message.answer("✅ Пароль обновлён.")
 
 
 @router.message(Command("getprompt"))
