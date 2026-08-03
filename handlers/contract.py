@@ -29,6 +29,12 @@ keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+# Клавиатура с кнопкой отмены — показывается, пока бот ждёт договор или текст для HTML
+cancel_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Отмена")]],
+    resize_keyboard=True
+)
+
 # Роутер для группировки хендлеров
 router = Router()
 
@@ -100,7 +106,11 @@ ADMIN_INFO_TEXT = (
     "<code>/getprompt html</code>\n\n"
     "Загрузить новый промпт:\n"
     "<code>/setprompt contract</code>\n"
-    "<code>/setprompt html</code>"
+    "<code>/setprompt html</code>\n\n"
+    "Добавить администратора:\n"
+    "<code>/addadmin user_id</code>\n\n"
+    "Удалить администратора:\n"
+    "<code>/removeadmin user_id</code>"
 )
 
 
@@ -144,7 +154,8 @@ async def cmd_check(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Отправьте текст договора или файл в формате .txt, .docx или .pdf. "
         "Бот проверит реквизиты сторон, наличие обязательных разделов и корректность НДС. "
-        "На выходе — список замечаний с указанием что именно требует исправления."
+        "На выходе — список замечаний с указанием что именно требует исправления.",
+        reply_markup=cancel_keyboard,
     )
 
 
@@ -162,8 +173,15 @@ async def btn_html(message: Message, state: FSMContext) -> None:
         "Отправьте текст анонса экскурсии — сырой или уже с HTML-разметкой. "
         "Бот приведёт его к корректной вёрстке. "
         "Полученный код вставьте в поле «Описание» на сайте в режиме «Источник», "
-        "предварительно очистив содержимое поля."
+        "предварительно очистив содержимое поля.",
+        reply_markup=cancel_keyboard,
     )
+
+
+@router.message(F.text == "Отмена")
+async def btn_cancel(message: Message, state: FSMContext) -> None:
+    """Обрабатывает нажатие кнопки 'Отмена' — вызывает cmd_cancel."""
+    await cmd_cancel(message, state)
 
 
 @router.message(F.document)
@@ -240,7 +258,7 @@ async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     """Сбрасывает текущее состояние FSM и отменяет любое ожидаемое действие."""
     await state.clear()
-    await message.answer("Действие отменено.")
+    await message.answer("Действие отменено.", reply_markup=keyboard)
 
 
 @router.message(Command("setpassword"))
@@ -267,6 +285,56 @@ async def cmd_setpassword(message: Message, bot: Bot) -> None:
         pass
 
     await message.answer("✅ Пароль обновлён.")
+
+
+@router.message(Command("addadmin"))
+async def cmd_addadmin(message: Message) -> None:
+    """
+    Скрытая команда для добавления нового администратора по его Telegram user_id.
+    Доступна только админам.
+    Пример: /addadmin 123456789
+    """
+    if not auth_service.is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("Использование: /addadmin <user_id>")
+        return
+
+    user_id = int(args[1])
+    if auth_service.add_admin(user_id):
+        await message.answer(f"✅ Пользователь {user_id} добавлен в администраторы.")
+    else:
+        await message.answer("Этот пользователь уже администратор.")
+
+
+@router.message(Command("removeadmin"))
+async def cmd_removeadmin(message: Message) -> None:
+    """
+    Скрытая команда для удаления администратора по его Telegram user_id.
+    Доступна только админам. Нельзя удалить последнего администратора.
+    Пример: /removeadmin 123456789
+    """
+    if not auth_service.is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.answer("Использование: /removeadmin <user_id>")
+        return
+
+    user_id = int(args[1])
+    try:
+        removed = auth_service.remove_admin(user_id)
+    except ValueError as e:
+        await message.answer(f"❌ Не удалось удалить: {e}.")
+        return
+
+    if removed:
+        await message.answer(f"✅ Пользователь {user_id} удалён из администраторов.")
+    else:
+        await message.answer("Этот пользователь не администратор.")
 
 
 @router.message(Command("getprompt"))

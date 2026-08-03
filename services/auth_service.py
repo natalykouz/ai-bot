@@ -84,3 +84,28 @@ def set_password(new_password: str) -> None:
     data["salt"] = salt
     data["password_hash"] = _hash_password(new_password, salt)
     _save(data)
+
+
+def add_admin(user_id: int) -> bool:
+    """Добавляет user_id в admin_ids. Возвращает False, если уже администратор."""
+    data = _load()
+    if user_id in data["admin_ids"]:
+        return False
+    data["admin_ids"].append(user_id)
+    _save(data)
+    return True
+
+
+def remove_admin(user_id: int) -> bool:
+    """
+    Убирает user_id из admin_ids. Возвращает False, если он не был администратором.
+    Не позволяет удалить последнего администратора — иначе бот некому будет администрировать.
+    """
+    data = _load()
+    if user_id not in data["admin_ids"]:
+        return False
+    if len(data["admin_ids"]) <= 1:
+        raise ValueError("нельзя удалить последнего администратора")
+    data["admin_ids"].remove(user_id)
+    _save(data)
+    return True
