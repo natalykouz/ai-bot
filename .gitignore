@@ -4,4 +4,4 @@ __pycache__/
 *.pyc
 *.pyo
 bot-admin/
-data/
+prompts/auth.json

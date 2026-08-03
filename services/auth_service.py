@@ -1,11 +1,14 @@
 """
 Контроль доступа к боту по паролю.
 
-Состояние (хеш пароля, admin_ids, allowed_users) хранится в data/auth.json —
+Состояние (хеш пароля, admin_ids, allowed_users) хранится в prompts/auth.json —
 файл переживает перезапуски бота и правится только через команды в Telegram,
 без правки кода или .env.
+Лежит в папке prompts/, а не в отдельной data/, потому что на Railway к одному
+сервису можно подключить только один persistent volume — он уже примонтирован
+на prompts/, так что переиспользуем его вместо второго volume.
 
-При первом запуске (если data/auth.json ещё нет) состояние создаётся
+При первом запуске (если prompts/auth.json ещё нет) состояние создаётся
 из переменных окружения ADMIN_IDS и BOT_PASSWORD.
 """
 
@@ -14,7 +17,7 @@ import json
 import os
 import secrets
 
-AUTH_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "auth.json")
+AUTH_FILE = os.path.join(os.path.dirname(__file__), "..", "prompts", "auth.json")
 
 
 def _hash_password(password: str, salt: str) -> str:
