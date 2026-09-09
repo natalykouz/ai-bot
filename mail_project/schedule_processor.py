@@ -1,9 +1,10 @@
 """Schedule v1: XLSX выгрузка мероприятий -> builds/<BUILD_ID>/schedule/SCHEDULE.txt.
 
 Правила обработки — EVENTS_RULES.md (единственный источник бизнес-правил).
-Основной источник базовых ссылок туров — Google Sheets, см. load_tour_links_from_sheet()
-и переменную окружения TOUR_LINKS_SHEET_CSV_URL. tour_links.csv/load_tour_links() —
-локальный справочник, оставлен в коде, но в run() больше не вызывается (см. ниже).
+Основной источник базовых ссылок и Заголовка/Подзаголовка мероприятия — Google
+Sheets, один HTTP-запрос за запуск, см. load_tour_sheet_data() и переменную
+окружения TOUR_LINKS_SHEET_CSV_URL. tour_links.csv/load_tour_links() — локальный
+справочник ссылок, оставлен в коде, но в run() больше не вызывается (см. ниже).
 """
 
 import csv
@@ -94,39 +95,57 @@ def load_tour_links(build_dir: Path) -> dict:
     return links
 
 
-def load_tour_links_from_sheet(url: str | None, timeout: float = TOUR_LINKS_SHEET_TIMEOUT) -> dict:
-    """Google Sheets как основной источник базовых ссылок туров — TSV-экспорт
-    (output=tsv) по прямой ссылке, без Google API и авторизации. Формат — те же
-    колонки ID/Ссылка, что и в tour_links.csv (EVENTS_RULES.md, раздел 6).
+def _fetch_tour_sheet_rows(url: str | None, timeout: float = TOUR_LINKS_SHEET_TIMEOUT) -> list:
+    """Единственный HTTP-запрос к Google Sheets (TSV-экспорт, output=tsv) за один
+    запуск генерации расписания — источник и ссылок, и Заголовка/Подзаголовка (см.
+    load_tour_sheet_data() ниже). Без Google API и авторизации.
 
     Любая проблема — не задан URL, сеть недоступна, таймаут, ответ не похож на
     табличные данные (например HTML-страница логина у закрытой таблицы) —
-    возвращает {}, а не исключение: генерация расписания не должна падать из-за
-    недоступности таблицы. Отсутствие/пустой результат здесь означает, что
-    _build_link() ниже (не меняется) подставит FALLBACK_URL_TEMPLATE для каждого
-    tour_id, как и для tour_id, которого в таблице просто нет."""
+    возвращает [], а не исключение: генерация расписания не должна падать из-за
+    недоступности таблицы."""
     if not url:
-        return {}
+        return []
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             content_type = resp.headers.get("Content-Type", "")
             if "html" in content_type.lower():
-                return {}
+                return []
             raw = resp.read().decode("utf-8-sig")
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
-        return {}
-
-    links = {}
+        return []
     try:
-        reader = csv.DictReader(raw.splitlines(), delimiter="\t")
-        for row in reader:
-            tour_id = row.get("ID")
-            link = row.get("Ссылка")
-            if tour_id and link:
-                links[str(tour_id).strip()] = link.strip()
+        return list(csv.DictReader(raw.splitlines(), delimiter="\t"))
     except csv.Error:
-        return {}
-    return links
+        return []
+
+
+def load_tour_sheet_data(url: str | None, timeout: float = TOUR_LINKS_SHEET_TIMEOUT) -> tuple:
+    """Один запрос к Google Sheets (_fetch_tour_sheet_rows) -> (tour_links, tour_titles),
+    сопоставление по `ID` (это `ID тура`, EVENTS_RULES.md, разделы 6-7):
+
+    - tour_links: ID -> Ссылка. Отсутствие записи/URL/таблицы — {} — означает, что
+      _build_link() (не меняется) подставит FALLBACK_URL_TEMPLATE для tour_id;
+    - tour_titles: ID -> {"title": Заголовок или None, "subtitle": Подзаголовок или
+      None} — пустое значение колонки -> None, дальше это решает _build_event()
+      (fallback на Название из XLSX / отсутствие подзаголовка)."""
+    links = {}
+    titles = {}
+    for row in _fetch_tour_sheet_rows(url, timeout):
+        tour_id = row.get("ID")
+        if not tour_id:
+            continue
+        tour_id = str(tour_id).strip()
+
+        link = row.get("Ссылка")
+        if link:
+            links[tour_id] = link.strip()
+
+        title = (row.get("Заголовок") or "").strip()
+        subtitle = (row.get("Подзаголовок") or "").strip()
+        titles[tour_id] = {"title": title or None, "subtitle": subtitle or None}
+
+    return links, titles
 
 
 def _is_blank(value) -> bool:
@@ -240,7 +259,7 @@ def _build_link(tour_id: int, event_id: int, event_date: date_cls, utm_source: s
     return urlunparse(parsed._replace(query=new_qs))
 
 
-def _build_event(row: dict, tour_links: dict):
+def _build_event(row: dict, tour_links: dict, tour_titles: dict):
     event_id = _to_int_or_none(row.get("ID события"))
     tour_id = _to_int_or_none(row.get("ID тура"))
     dt = _parse_datetime_cell(row.get("Дата"))
@@ -275,21 +294,32 @@ def _build_event(row: dict, tour_links: dict):
 
     link = _build_link(tour_id, event_id, dt.date(), utm_source, tour_links)
 
+    # Заголовок/Подзаголовок из Google Sheets (сопоставление по ID тура, см.
+    # load_tour_sheet_data). Название из XLSX остаётся источником для
+    # проверки обязательности поля выше и fallback-значением отображаемого
+    # названия — здесь никакого автоматического разбиения XLSX-названия на
+    # заголовок/подзаголовок не производится, только опциональная подмена
+    # целиком данными из таблицы.
+    sheet_meta = tour_titles.get(str(tour_id)) or {}
+    display_title = sheet_meta.get("title") or str(title).strip()
+    subtitle = sheet_meta.get("subtitle")
+
     return {
         "event_id": event_id,
         "tour_id": tour_id,
         "date": dt.date(),
         "time": dt.time(),
-        "title": str(title).strip(),
+        "title": display_title,
+        "subtitle": subtitle,
         "remaining": remaining,
         "link": link,
     }
 
 
-def filter_events(rows: list, tour_links: dict) -> list:
+def filter_events(rows: list, tour_links: dict, tour_titles: dict) -> list:
     events = []
     for row in rows:
-        event = _build_event(row, tour_links)
+        event = _build_event(row, tour_links, tour_titles)
         if event is not None:
             events.append(event)
     return events
@@ -321,6 +351,8 @@ def render_schedule(grouped: list) -> str:
             lines.append(f"tour_id: {event['tour_id']}")
             lines.append(f"time: {event['time'].strftime('%H:%M')}")
             lines.append(f"title: {event['title']}")
+            if event.get("subtitle"):
+                lines.append(f"subtitle: {event['subtitle']}")
             lines.append(f"link: {event['link']}")
             lines.append("")
 
@@ -354,8 +386,8 @@ def run(build_dir: Path) -> None:
         print(INVALID_STRUCTURE_MESSAGE)
         sys.exit(1)
 
-    tour_links = load_tour_links_from_sheet(os.getenv(TOUR_LINKS_SHEET_URL_ENV))
-    events = filter_events(rows, tour_links)
+    tour_links, tour_titles = load_tour_sheet_data(os.getenv(TOUR_LINKS_SHEET_URL_ENV))
+    events = filter_events(rows, tour_links, tour_titles)
     grouped = group_and_limit(events)
     schedule_text = render_schedule(grouped)
 

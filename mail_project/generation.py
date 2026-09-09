@@ -484,6 +484,8 @@ def _parse_schedule_txt(path: Path) -> list:
             current_event["time"] = line[len("time:"):].strip()
         elif line.startswith("title:") and current_event is not None:
             current_event["title"] = line[len("title:"):].strip()
+        elif line.startswith("subtitle:") and current_event is not None:
+            current_event["subtitle"] = line[len("subtitle:"):].strip()
         elif line.startswith("link:") and current_event is not None:
             current_event["link"] = line[len("link:"):].strip()
     flush_event()
@@ -501,8 +503,25 @@ def _fill_schedule_event_slot(html: str, slot_n: int, event: dict) -> str:
 
     block = re.sub(r"\b\d{2}:\d{2}\b", event["time"], block, count=1)
 
-    # Описания в SCHEDULE.txt нет — легитимно скрываем строку "текст" (letteros-hide).
-    block = _remove_hide_row(block, "текст")
+    subtitle = event.get("subtitle")
+    if subtitle:
+        # Подзаголовок из Google Sheets (см. schedule_processor.load_tour_sheet_data)
+        # заполняет строку "текст" тем же приёмом, что и "название" ниже.
+        text_span = _get_hide_row_span(block, "текст")
+        if text_span is None:
+            raise GenerationError(f"Schedule: не найдена строка «текст» в событии {slot_n}")
+        t_start, t_end = text_span
+        text_row = block[t_start:t_end]
+        text_row = re.sub(
+            r"(<tr[^>]*>\s*<td[^>]*>)(.*?)(</td>\s*</tr>)",
+            lambda m: m.group(1) + _escape_html_text(subtitle) + m.group(3),
+            text_row, count=1, flags=re.DOTALL,
+        )
+        block = block[:t_start] + text_row + block[t_end:]
+    else:
+        # Подзаголовка нет (ни в SCHEDULE.txt, ни, соответственно, в Google Sheets) —
+        # легитимно скрываем строку "текст" (letteros-hide), как и раньше.
+        block = _remove_hide_row(block, "текст")
 
     name_span = _get_hide_row_span(block, "название")
     if name_span is None:
