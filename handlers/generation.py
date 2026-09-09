@@ -428,8 +428,15 @@ async def add_component_start(callback: CallbackQuery, state: FSMContext) -> Non
     await state.update_data(step="waiting_component_name")
     await state.set_state(LetterGenStates.waiting_component_name)
     await callback.message.edit_text("Добавление компонента.")
+    if settings.catalog_url:
+        await callback.message.answer(
+            "Каталог компонентов — все варианты с превью, открывается в браузере:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Открыть каталог компонентов", url=settings.catalog_url),
+            ]]),
+        )
     await callback.message.answer(
-        "Введите название компонента точно как в каталоге (manifest.json).",
+        "Введите название компонента в формате «Модуль / Компонент», как в каталоге.",
         reply_markup=cancel_keyboard,
     )
     await callback.answer()

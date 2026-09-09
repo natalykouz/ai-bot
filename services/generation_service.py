@@ -99,11 +99,26 @@ def content_elements(module: str) -> list:
 
 
 def find_content_component(name: str) -> tuple | None:
-    """Ищет контентный компонент по точному названию element среди CONTENT_MODULES
-    (Шапки/Баннеры/Подвалы/Мероприятия сюда не входят — у них отдельные шаги
-    выбора). Используется вводом названия компонента текстом при добавлении."""
+    """Ищет контентный компонент по названию среди CONTENT_MODULES (Шапки/Баннеры/
+    Подвалы/Мероприятия сюда не входят — у них отдельные шаги выбора). Используется
+    вводом названия компонента текстом при добавлении.
+
+    Принимает как полный вид «Модуль / Компонент» (именно так подписаны блоки в
+    каталоге и копируются пользователем), так и просто «Компонент» без модуля."""
+    name = name.strip()
+    module_part: str | None = None
+    element_part = name
+    if " / " in name:
+        module_part, _, element_part = name.partition(" / ")
+        module_part = module_part.strip()
+        element_part = element_part.strip()
+
     for entry in _load_manifest():
-        if entry["module"] in CONTENT_MODULES and entry["element"] == name:
+        if entry["module"] not in CONTENT_MODULES:
+            continue
+        if module_part is not None and entry["module"] != module_part:
+            continue
+        if entry["element"] == element_part:
             return entry["module"], entry["element"]
     return None
 
