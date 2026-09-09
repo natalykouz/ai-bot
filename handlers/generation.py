@@ -180,6 +180,16 @@ async def schedule_gen_receive_xlsx(message: Message, state: FSMContext) -> None
     await message.answer("Готово.", reply_markup=main_menu_keyboard)
 
 
+@router.message(ScheduleGenStates.waiting_xlsx, F.text == "Отмена")
+@router.message(ScheduleGenStates.waiting_xlsx, Command("cancel"))
+async def schedule_gen_cancel(message: Message, state: FSMContext) -> None:
+    """Кнопка «Отмена»/команда /cancel на шаге ожидания XLSX — выходит из flow
+    без повторного «Ожидаю XLSX-файл» (в отличие от catch-all ниже) и без
+    попадания в общий /cancel из contract.py."""
+    await state.clear()
+    await message.answer("Генерация расписания отменена.", reply_markup=main_menu_keyboard)
+
+
 @router.message(ScheduleGenStates.waiting_xlsx)
 async def schedule_gen_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю XLSX-файл документом. Или отправьте /cancel для отмены.")

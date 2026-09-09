@@ -103,6 +103,18 @@ def _escape_html_text(value: str) -> str:
     return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Канонический системный asset стрелки рядом с "ЗАПИСАТЬСЯ" (MGI_UNISENDER_ASSETS.md,
+# раздел «Расписание», f7008a36-9043-4ae5-a770-c3018cdc38f9.png) — декоративная иконка
+# компонента, а не контентная переменная. manifest.json тем не менее описывает её как
+# variables[].type == "image" (см. IMAGE_SLOTS.md §11), поэтому без этого исключения
+# _fill_first_local_image ниже подставляет вместо неё SVG-плейсхолдер отсутствующего
+# изображения (real_url для неё в Telegram-flow никогда не передаётся).
+_ARROW_ASSET_SRC = (
+    "https://img.hiteml.com/en/v5/user-files?userId=7788090&resource=himg&disposition=inline"
+    "&name=689qtgee7jj88kb4a6h4mzmz4k4q8gk381pdsfs47w4iunexiftsjkgf8nt11izc71rwfs4guaky3hxah53q5ytezsa4pcndz1uafkqkb46h895rgu5gryoih9r3ct567"
+)
+
+
 def _missing_image_placeholder_src(width: int | None, alt: str) -> str:
     """Информативный placeholder для отсутствующего asset'а image-slot'а: data-URI SVG
     того же размера, что и canonical <img> (по его width), с подписью размера и
@@ -198,9 +210,14 @@ def _fill_first_local_image(html: str, real_url, slot_id: str, alt: str):
     w_match = re.search(r'\bwidth="(\d+)"', tag)
     if w_match:
         width = int(w_match.group(1))
-    new_src = real_url if real_url else _missing_image_placeholder_src(width, alt)
     if 'src="' not in tag:
         raise GenerationError("<img> без src в каноническом компоненте")
+    if real_url:
+        new_src = real_url
+    else:
+        src_match = re.search(r'src="([^"]*)"', tag)
+        original_src = src_match.group(1) if src_match else None
+        new_src = original_src if original_src == _ARROW_ASSET_SRC else _missing_image_placeholder_src(width, alt)
     new_tag = re.sub(r'src="[^"]*"', f'src="{_escape_html_text(new_src)}"', tag, count=1)
     if re.search(r'\balt="[^"]*"', new_tag):
         new_tag = re.sub(r'alt="[^"]*"', f'alt="{_escape_html_text(alt)}"', new_tag, count=1)
@@ -233,6 +250,57 @@ def _fill_component_images(html: str, image_count: int, real_urls: list, block: 
         processed += fixed[: m.end()]
         remaining = fixed[m.end():]
         entry = {"slot_id": slot_id, "block": block, "purpose": purpose_fn(i), "alt": alt, "source": real_url}
+        if width:
+            entry["width"] = width
+        image_entries.append(entry)
+    return processed + remaining, image_entries
+
+
+def _placeholder_content_images(html: str, block: str, purpose_fn, alt_fn, slot_counter: SlotCounter, slot_prefix: str):
+    """MVP-поведение для контентных компонентов в run_selected(): Generation не ищет,
+    не подбирает и не пытается подставить реальное изображение — в отличие от
+    _fill_component_images()/_fill_first_local_image() выше (которые остаются в
+    работе для Hero и старого content-YAML пайплайна run()), эта функция не
+    принимает real_url и не опирается на manifest.json variables[].type=="image"
+    (который перечисляет и системные assets компонента, например стрелку
+    «ЗАПИСАТЬСЯ» — см. _ARROW_ASSET_SRC). Вместо этого каждый <img> компонента
+    получает штатную визуальную SVG-заглушку с подсказкой размера/формата
+    (_missing_image_placeholder_src) по порядку появления в HTML, кроме тегов с
+    src известного системного asset — они остаются как в каноническом компоненте.
+    Возвращает (html, image_entries) в формате images.json (см. run_selected())."""
+    processed = ""
+    remaining = html
+    image_entries = []
+    while True:
+        m = re.search(r"<img\b[^>]*>", remaining)
+        if m is None:
+            break
+        tag = m.group(0)
+        processed += remaining[: m.start()]
+        src_match = re.search(r'src="([^"]*)"', tag)
+        original_src = src_match.group(1) if src_match else None
+        if original_src == _ARROW_ASSET_SRC:
+            processed += tag
+            remaining = remaining[m.end():]
+            continue
+
+        width = None
+        w_match = re.search(r'\bwidth="(\d+)"', tag)
+        if w_match:
+            width = int(w_match.group(1))
+        idx = len(image_entries)
+        slot_id = slot_counter(slot_prefix)
+        alt = alt_fn(idx)
+        new_src = _missing_image_placeholder_src(width, alt)
+        new_tag = re.sub(r'src="[^"]*"', f'src="{_escape_html_text(new_src)}"', tag, count=1)
+        if re.search(r'\balt="[^"]*"', new_tag):
+            new_tag = re.sub(r'alt="[^"]*"', f'alt="{_escape_html_text(alt)}"', new_tag, count=1)
+        else:
+            new_tag = new_tag.replace("<img", f'<img alt="{_escape_html_text(alt)}"', 1)
+        processed += new_tag
+        remaining = remaining[m.end():]
+
+        entry = {"slot_id": slot_id, "block": block, "purpose": purpose_fn(idx), "alt": alt, "source": None}
         if width:
             entry["width"] = width
         image_entries.append(entry)
@@ -667,11 +735,25 @@ def run_selected(build_dir: Path, selection: dict) -> None:
             content_entry = library.entry(module, element)
             content_html = build_generic_block(library, module, element, texts)
 
-            content_image_count = sum(1 for v in content_entry.get("variables", []) if v.get("type") == "image")
             label = texts[0] if texts else None
             alt = f"Иллюстрация к материалу «{label}»" if label else "Иллюстрация к материалу выпуска"
-            content_html, content_images = _fill_component_images(
-                content_html, content_image_count, block.get("images") or [],
+
+            # Старая логика поиска/подстановки изображений (manifest.json
+            # variables[].type=="image" + попытка подставить реальный URL из
+            # block["images"]) — не используется в MVP, см. _placeholder_content_images()
+            # ниже. Оставлено закомментированным для возврата, если понадобится upload
+            # реальных изображений контентных компонентов.
+            #
+            # content_image_count = sum(1 for v in content_entry.get("variables", []) if v.get("type") == "image")
+            # content_html, content_images = _fill_component_images(
+            #     content_html, content_image_count, block.get("images") or [],
+            #     block=f"content_{i}",
+            #     purpose_fn=lambda j: f"{module}/{element} — изображение материала",
+            #     alt_fn=lambda j: alt,
+            #     slot_counter=slot_counter, slot_prefix="content",
+            # )
+            content_html, content_images = _placeholder_content_images(
+                content_html,
                 block=f"content_{i}",
                 purpose_fn=lambda j: f"{module}/{element} — изображение материала",
                 alt_fn=lambda j: alt,
