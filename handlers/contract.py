@@ -23,9 +23,9 @@ from services import auth_service
 # Клавиатура главного меню
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text="Email-рассылки")],
         [KeyboardButton(text="Проверка договоров")],
-        [KeyboardButton(text="Форматирование HTML страниц")],
-        [KeyboardButton(text="Email-рассылки")]
+        [KeyboardButton(text="Форматирование HTML страниц")]
     ],
     resize_keyboard=True
 )
