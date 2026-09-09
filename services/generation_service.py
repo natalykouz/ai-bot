@@ -99,6 +99,16 @@ def sample_text_count(module: str, element: str) -> int:
     raise GenerationServiceError(f"Компонент отсутствует в manifest.json: {module}/{element}")
 
 
+def sample_texts(module: str, element: str) -> list:
+    """Полный demo-текст компонента по порядку sample_text — используется
+    упрощённым режимом ввода (одно поле СММ, остальные позиции остаются
+    demo-контентом библиотеки, см. services/component_fields.get_single_field)."""
+    for entry in _load_manifest():
+        if entry["module"] == module and entry["element"] == element:
+            return list(entry["sample_text"])
+    raise GenerationServiceError(f"Компонент отсутствует в manifest.json: {module}/{element}")
+
+
 # --- Build Manager (существующий CLI — mail_project/build_manager.py) ----------
 
 async def _run_build_manager(*args: str) -> str:

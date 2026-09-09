@@ -34,6 +34,9 @@ from services import auth_service, component_fields, generation_service as gensv
 
 CLEANUP_DEFAULT_DAYS = 7
 
+SMM_INSTRUCTION_PATH = Path(__file__).resolve().parent.parent / "SMM_INSTRUCTION.md"
+SMM_INSTRUCTION_TEXT = SMM_INSTRUCTION_PATH.read_text(encoding="utf-8").strip()
+
 logger = logging.getLogger(__name__)
 
 router = Router()
@@ -62,9 +65,10 @@ class LetterGenStates(StatesGroup):
     choosing_content_module = State()
     choosing_content_element = State()
     waiting_content_text = State()
-    confirming_content_fields = State()
-    waiting_field_value = State()
-    reviewing_filled_component = State()
+    confirming_content_fields = State()  # старый многошаговый flow (закомментирован ниже) — состояние оставлено для быстрого возврата
+    waiting_field_value = State()  # см. выше
+    reviewing_filled_component = State()  # см. выше
+    waiting_single_field_value = State()  # упрощённый режим: одно поле на компонент, см. COMPONENT_SMM_FIELD_MAPPING.md
     choosing_add_more = State()
 
 
@@ -412,104 +416,132 @@ async def choose_content_element(callback: CallbackQuery, state: FSMContext) -> 
         await callback.answer()
         return
 
-    labels = component_fields.get_field_labels(module, element)
-    if labels is None or len(labels) != count:
-        # Безопасный откат: для компонентов без проверенной семантики полей
-        # (в т.ч. component_fields.UNSAFE_ELEMENTS) — старый режим «N строк одним
-        # сообщением», без придуманных названий полей.
-        await state.update_data(step="waiting_content_text")
-        await state.set_state(LetterGenStates.waiting_content_text)
+    single = component_fields.get_single_field(module, element)
+    if single is not None:
+        # Упрощённый режим (текущий, действующий): одно поле «заголовок/основная
+        # мысль блока» на компонент — см. mail_project/COMPONENT_SMM_FIELD_MAPPING.md
+        # и services/component_fields.SINGLE_FIELD_INDEX. Остальные позиции
+        # sample_text остаются demo-текстом библиотеки, введённое значение
+        # подставляется только в выбранный индекс.
+        field_index, field_label = single
+        demo_texts = gensvc.sample_texts(module, element)
+        await state.update_data(
+            _single_field_index=field_index,
+            _demo_texts=demo_texts,
+            step="waiting_single_field_value",
+        )
+        await state.set_state(LetterGenStates.waiting_single_field_value)
         await callback.message.answer(
-            f"Введите содержимое компонента — {count} {_plural_stroki(count)}, каждая с новой строки.",
+            f"<b>{html.escape(field_label)}</b>\nНапишите {field_label[0].lower()}{field_label[1:]}:",
             reply_markup=cancel_keyboard,
         )
         await callback.answer()
         return
 
-    await state.update_data(_field_labels=labels, _field_values=[], step="confirming_content_fields")
-    await state.set_state(LetterGenStates.confirming_content_fields)
-    fields_list = "\n".join(f"• {html.escape(label)}" for label in labels)
+    # Безопасный откат: для компонентов без запланированного единственного поля
+    # (не должно происходить для count > 0 — SINGLE_FIELD_INDEX покрывает все
+    # такие компоненты, оставлено на случай несовпадения) — старый режим
+    # «N строк одним сообщением», без придуманных названий полей.
+    await state.update_data(step="waiting_content_text")
+    await state.set_state(LetterGenStates.waiting_content_text)
     await callback.message.answer(
-        f"Нужно заполнить:\n{fields_list}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Начать заполнение", callback_data="gen:fillstart"),
-        ]]),
-    )
-    await callback.answer()
-
-
-@router.callback_query(LetterGenStates.confirming_content_fields, F.data == "gen:fillstart")
-async def start_field_fill(callback: CallbackQuery, state: FSMContext) -> None:
-    await _ask_next_field(callback.message, state)
-    await callback.answer()
-
-
-async def _ask_next_field(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    labels = data["_field_labels"]
-    values = data.get("_field_values", [])
-    label = labels[len(values)]
-
-    await state.update_data(step="waiting_field_value")
-    await state.set_state(LetterGenStates.waiting_field_value)
-    await message.answer(
-        f"<b>{html.escape(label)}</b>\nНапишите {label[0].lower()}{label[1:]}:",
+        f"Введите содержимое компонента — {count} {_plural_stroki(count)}, каждая с новой строки.",
         reply_markup=cancel_keyboard,
     )
-
-
-@router.message(LetterGenStates.waiting_field_value, F.text)
-async def receive_field_value(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    labels = data["_field_labels"]
-    values = data.get("_field_values", [])
-    values.append(message.text)
-    await state.update_data(_field_values=values)
-
-    if len(values) < len(labels):
-        await _ask_next_field(message, state)
-        return
-
-    await _show_fields_review(message, state)
-
-
-async def _show_fields_review(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    module = data["_current_module"]
-    element = data["_current_element"]
-    labels = data["_field_labels"]
-    values = data["_field_values"]
-
-    recap = "\n".join(
-        f"• {html.escape(label)}: {html.escape(value)}" for label, value in zip(labels, values)
-    )
-    await state.update_data(step="reviewing_filled_component")
-    await state.set_state(LetterGenStates.reviewing_filled_component)
-    await message.answer(
-        f"<b>Компонент заполнен</b>\n{html.escape(module)} / {html.escape(element)}\n\n{recap}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Добавить в рассылку", callback_data="gen:fieldsdone:add")],
-            [InlineKeyboardButton(text="Изменить", callback_data="gen:fieldsdone:edit")],
-        ]),
-    )
-
-
-@router.callback_query(LetterGenStates.reviewing_filled_component, F.data == "gen:fieldsdone:add")
-async def fields_review_add(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    module = data["_current_module"]
-    element = data["_current_element"]
-    values = data["_field_values"]
-    await _content_added(callback.message, state, module, element, values)
     await callback.answer()
 
 
-@router.callback_query(LetterGenStates.reviewing_filled_component, F.data == "gen:fieldsdone:edit")
-async def fields_review_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(_field_values=[])
-    await callback.message.edit_text("Заполняю компонент заново.")
-    await _ask_next_field(callback.message, state)
-    await callback.answer()
+@router.message(LetterGenStates.waiting_single_field_value, F.text)
+async def receive_single_field_value(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    module = data["_current_module"]
+    element = data["_current_element"]
+    field_index = data["_single_field_index"]
+    texts = list(data["_demo_texts"])
+    texts[field_index] = message.text
+    await _content_added(message, state, module, element, texts)
+
+
+# ===================================================================================
+# СТАРЫЙ многошаговый flow заполнения ВСЕХ полей компонента (по одному вопросу на
+# каждую позицию sample_text) — заменён упрощённым режимом «одно поле» выше.
+# Оставлен закомментированным для быстрого возврата: раскомментировать этот блок,
+# закомментировать/удалить блок с `single = component_fields.get_single_field(...)`
+# выше и вернуть в него ветку `confirming_content_fields` вместо `waiting_single_field_value`.
+# ===================================================================================
+#
+# @router.callback_query(LetterGenStates.confirming_content_fields, F.data == "gen:fillstart")
+# async def start_field_fill(callback: CallbackQuery, state: FSMContext) -> None:
+#     await _ask_next_field(callback.message, state)
+#     await callback.answer()
+#
+#
+# async def _ask_next_field(message: Message, state: FSMContext) -> None:
+#     data = await state.get_data()
+#     labels = data["_field_labels"]
+#     values = data.get("_field_values", [])
+#     label = labels[len(values)]
+#
+#     await state.update_data(step="waiting_field_value")
+#     await state.set_state(LetterGenStates.waiting_field_value)
+#     await message.answer(
+#         f"<b>{html.escape(label)}</b>\nНапишите {label[0].lower()}{label[1:]}:",
+#         reply_markup=cancel_keyboard,
+#     )
+#
+#
+# @router.message(LetterGenStates.waiting_field_value, F.text)
+# async def receive_field_value(message: Message, state: FSMContext) -> None:
+#     data = await state.get_data()
+#     labels = data["_field_labels"]
+#     values = data.get("_field_values", [])
+#     values.append(message.text)
+#     await state.update_data(_field_values=values)
+#
+#     if len(values) < len(labels):
+#         await _ask_next_field(message, state)
+#         return
+#
+#     await _show_fields_review(message, state)
+#
+#
+# async def _show_fields_review(message: Message, state: FSMContext) -> None:
+#     data = await state.get_data()
+#     module = data["_current_module"]
+#     element = data["_current_element"]
+#     labels = data["_field_labels"]
+#     values = data["_field_values"]
+#
+#     recap = "\n".join(
+#         f"• {html.escape(label)}: {html.escape(value)}" for label, value in zip(labels, values)
+#     )
+#     await state.update_data(step="reviewing_filled_component")
+#     await state.set_state(LetterGenStates.reviewing_filled_component)
+#     await message.answer(
+#         f"<b>Компонент заполнен</b>\n{html.escape(module)} / {html.escape(element)}\n\n{recap}",
+#         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+#             [InlineKeyboardButton(text="Добавить в рассылку", callback_data="gen:fieldsdone:add")],
+#             [InlineKeyboardButton(text="Изменить", callback_data="gen:fieldsdone:edit")],
+#         ]),
+#     )
+#
+#
+# @router.callback_query(LetterGenStates.reviewing_filled_component, F.data == "gen:fieldsdone:add")
+# async def fields_review_add(callback: CallbackQuery, state: FSMContext) -> None:
+#     data = await state.get_data()
+#     module = data["_current_module"]
+#     element = data["_current_element"]
+#     values = data["_field_values"]
+#     await _content_added(callback.message, state, module, element, values)
+#     await callback.answer()
+#
+#
+# @router.callback_query(LetterGenStates.reviewing_filled_component, F.data == "gen:fieldsdone:edit")
+# async def fields_review_edit(callback: CallbackQuery, state: FSMContext) -> None:
+#     await state.update_data(_field_values=[])
+#     await callback.message.edit_text("Заполняю компонент заново.")
+#     await _ask_next_field(callback.message, state)
+#     await callback.answer()
 
 
 @router.message(LetterGenStates.waiting_content_text, F.text)
@@ -597,6 +629,7 @@ async def finish_generation(callback: CallbackQuery, state: FSMContext) -> None:
         BufferedInputFile(html_bytes, filename=f"{build_id}.html"),
         caption="Готово! Рассылка создана.",
     )
+    await callback.message.answer(SMM_INSTRUCTION_TEXT, parse_mode=None)
     await state.clear()
     await callback.message.answer("Выберите действие:", reply_markup=main_menu_keyboard)
     await callback.answer()
