@@ -115,17 +115,73 @@ _ARROW_ASSET_SRC = (
 )
 
 
+def _wrap_svg_text_lines(text: str, font_size: float, max_width: float) -> list[str]:
+    """Приближённо разбивает text по словам на строки, помещающиеся в max_width при
+    данном font_size. Точный text-measurement недоступен (SVG собирается как
+    data-URI на этапе генерации, не в браузере) — используется усреднённая ширина
+    символа для Arial. Отдельное слово длиннее целой строки режется по символам,
+    чтобы не вылезти за ширину placeholder'а."""
+    if not text:
+        return []
+    avg_char_width = font_size * 0.55
+    max_chars = max(1, int(max_width / avg_char_width))
+    lines: list[str] = []
+    for word in text.split():
+        if not lines:
+            lines.append(word)
+            continue
+        candidate = f"{lines[-1]} {word}"
+        if len(candidate) <= max_chars:
+            lines[-1] = candidate
+        else:
+            lines.append(word)
+    result: list[str] = []
+    for line in lines:
+        while len(line) > max_chars:
+            result.append(line[:max_chars])
+            line = line[max_chars:]
+        result.append(line)
+    return result
+
+
 def _missing_image_placeholder_src(width: int | None, alt: str) -> str:
     """Информативный placeholder для отсутствующего asset'а image-slot'а: data-URI SVG
     того же размера, что и canonical <img> (по его width), с подписью размера и
     ALT/назначения — вместо обычного broken image. Позиционирование и размеры самого
-    <img> (width/style canonical-компонента) не трогаются, меняется только src."""
+    <img> (width/style canonical-компонента) не трогаются, меняется только src.
+
+    Длинная подпись ALT/назначения переносится по строкам в пределах ширины
+    placeholder'а (с отступами по краям), а если не помещается по высоте выделенной
+    под неё области даже с переносом — размер шрифта подписи уменьшается до тех пор,
+    пока не поместится (либо до нижней границы читаемости). Короткая подпись в одну
+    строку рендерится как раньше — размер/позиция/шрифт для неё не меняются."""
     w = width if width else 400
     h = max(1, round(w * 0.75))
     label_size = max(10, min(22, w // 12))
     sub_size = max(9, label_size - 4)
     dims_text = _escape_html_text(f"{w}×{h}")
     alt_text = _escape_html_text(alt)[:90] if alt else "Изображение отсутствует"
+
+    horizontal_margin = max(8, w * 0.06)
+    max_text_width = max(1, w - 2 * horizontal_margin)
+    available_height = h * 0.42
+    min_sub_size = 8
+
+    font_size = sub_size
+    alt_lines = _wrap_svg_text_lines(alt_text, font_size, max_text_width)
+    while len(alt_lines) * (font_size * 1.2) > available_height and font_size > min_sub_size:
+        font_size -= 1
+        alt_lines = _wrap_svg_text_lines(alt_text, font_size, max_text_width)
+
+    line_height = font_size * 1.2
+    block_top = h * 0.65 - (len(alt_lines) - 1) * line_height / 2
+    alt_text_svg = "".join(
+        f'<text x="50%" y="{block_top + i * line_height:.1f}" text-anchor="middle" '
+        f'dominant-baseline="middle" font-family="Arial, sans-serif" font-size="{font_size}" '
+        f'fill="#856404">{line}</text>'
+        for i, line in enumerate(alt_lines)
+    )
+
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
         f'<rect x="1" y="1" width="{w - 2}" height="{h - 2}" fill="#FFF3CD" '
@@ -133,9 +189,7 @@ def _missing_image_placeholder_src(width: int | None, alt: str) -> str:
         f'<text x="50%" y="45%" text-anchor="middle" dominant-baseline="middle" '
         f'font-family="Arial, sans-serif" font-size="{label_size}" font-weight="700" '
         f'fill="#856404">{dims_text}</text>'
-        f'<text x="50%" y="65%" text-anchor="middle" dominant-baseline="middle" '
-        f'font-family="Arial, sans-serif" font-size="{sub_size}" '
-        f'fill="#856404">{alt_text}</text>'
+        f'{alt_text_svg}'
         f'</svg>'
     )
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")

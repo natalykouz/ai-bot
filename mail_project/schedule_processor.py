@@ -1,12 +1,17 @@
 """Schedule v1: XLSX выгрузка мероприятий -> builds/<BUILD_ID>/schedule/SCHEDULE.txt.
 
 Правила обработки — EVENTS_RULES.md (единственный источник бизнес-правил).
-Постоянный справочник базовых ссылок туров — tour_links.csv (см. EVENTS_RULES.md, раздел 6).
+Основной источник базовых ссылок туров — Google Sheets, см. load_tour_links_from_sheet()
+и переменную окружения TOUR_LINKS_SHEET_CSV_URL. tour_links.csv/load_tour_links() —
+локальный справочник, оставлен в коде, но в run() больше не вызывается (см. ниже).
 """
 
 import csv
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from collections import defaultdict
 from datetime import date as date_cls, datetime, time as time_cls
 from pathlib import Path
@@ -15,6 +20,8 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 import openpyxl
 
 TOUR_LINKS_FILENAME = "tour_links.csv"
+TOUR_LINKS_SHEET_URL_ENV = "TOUR_LINKS_SHEET_CSV_URL"
+TOUR_LINKS_SHEET_TIMEOUT = 5
 
 REQUIRED_COLUMNS = [
     "ID события",
@@ -70,6 +77,8 @@ class InvalidStructureError(Exception):
 
 
 def load_tour_links(build_dir: Path) -> dict:
+    """Локальный справочник tour_links.csv (module docstring) — не вызывается в run(),
+    оставлен для отладки/возврата."""
     tour_links_path = build_dir / "source" / TOUR_LINKS_FILENAME
     if not tour_links_path.is_file():
         return {}
@@ -82,6 +91,41 @@ def load_tour_links(build_dir: Path) -> dict:
             link = row.get("Ссылка")
             if tour_id and link:
                 links[str(tour_id).strip()] = link.strip()
+    return links
+
+
+def load_tour_links_from_sheet(url: str | None, timeout: float = TOUR_LINKS_SHEET_TIMEOUT) -> dict:
+    """Google Sheets как основной источник базовых ссылок туров — TSV-экспорт
+    (output=tsv) по прямой ссылке, без Google API и авторизации. Формат — те же
+    колонки ID/Ссылка, что и в tour_links.csv (EVENTS_RULES.md, раздел 6).
+
+    Любая проблема — не задан URL, сеть недоступна, таймаут, ответ не похож на
+    табличные данные (например HTML-страница логина у закрытой таблицы) —
+    возвращает {}, а не исключение: генерация расписания не должна падать из-за
+    недоступности таблицы. Отсутствие/пустой результат здесь означает, что
+    _build_link() ниже (не меняется) подставит FALLBACK_URL_TEMPLATE для каждого
+    tour_id, как и для tour_id, которого в таблице просто нет."""
+    if not url:
+        return {}
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "html" in content_type.lower():
+                return {}
+            raw = resp.read().decode("utf-8-sig")
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return {}
+
+    links = {}
+    try:
+        reader = csv.DictReader(raw.splitlines(), delimiter="\t")
+        for row in reader:
+            tour_id = row.get("ID")
+            link = row.get("Ссылка")
+            if tour_id and link:
+                links[str(tour_id).strip()] = link.strip()
+    except csv.Error:
+        return {}
     return links
 
 
@@ -310,7 +354,7 @@ def run(build_dir: Path) -> None:
         print(INVALID_STRUCTURE_MESSAGE)
         sys.exit(1)
 
-    tour_links = load_tour_links(build_dir)
+    tour_links = load_tour_links_from_sheet(os.getenv(TOUR_LINKS_SHEET_URL_ENV))
     events = filter_events(rows, tour_links)
     grouped = group_and_limit(events)
     schedule_text = render_schedule(grouped)
