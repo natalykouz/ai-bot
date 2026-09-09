@@ -88,8 +88,24 @@ def hero_options() -> list:
     return _elements_for("Баннеры")
 
 
+def schedule_template_options() -> list:
+    """Варианты canonical-шаблона расписания (модуль «Мероприятия», элементы
+    «Расписание N») — выбор шаблона в шаге после загрузки SCHEDULE.txt."""
+    return _elements_for("Мероприятия", "Расписание")
+
+
 def content_elements(module: str) -> list:
     return _elements_for(module)
+
+
+def find_content_component(name: str) -> tuple | None:
+    """Ищет контентный компонент по точному названию element среди CONTENT_MODULES
+    (Шапки/Баннеры/Подвалы/Мероприятия сюда не входят — у них отдельные шаги
+    выбора). Используется вводом названия компонента текстом при добавлении."""
+    for entry in _load_manifest():
+        if entry["module"] in CONTENT_MODULES and entry["element"] == name:
+            return entry["module"], entry["element"]
+    return None
 
 
 def sample_text_count(module: str, element: str) -> int:

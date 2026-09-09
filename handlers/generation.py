@@ -59,11 +59,13 @@ class LetterGenStates(StatesGroup):
     choosing_branch = State()
     choosing_schedule_choice = State()
     waiting_schedule_txt = State()
+    choosing_schedule_template = State()
     choosing_header = State()
     choosing_hero = State()
     choosing_footer = State()
-    choosing_content_module = State()
-    choosing_content_element = State()
+    choosing_content_module = State()  # старый flow «выбор модуля -> выбор элемента» (закомментирован ниже) — состояния оставлены для быстрого возврата
+    choosing_content_element = State()  # см. выше
+    waiting_component_name = State()  # новый режим: название компонента вводится текстом (соответствие manifest.json), см. _ask_component_menu/_add_component_by_name
     waiting_content_text = State()
     confirming_content_fields = State()  # старый многошаговый flow (закомментирован ниже) — состояние оставлено для быстрого возврата
     waiting_field_value = State()  # см. выше
@@ -291,7 +293,32 @@ async def receive_schedule_txt(message: Message, state: FSMContext) -> None:
         return
 
     await message.answer("SCHEDULE.txt получен.")
-    await _ask_header(message, state)
+    await _ask_schedule_template(message, state)
+
+
+async def _ask_schedule_template(message: Message, state: FSMContext) -> None:
+    options = gensvc.schedule_template_options()
+    await state.update_data(_schedule_template_list=options, step="choosing_schedule_template")
+    await state.set_state(LetterGenStates.choosing_schedule_template)
+    buttons = [
+        InlineKeyboardButton(text=str(i + 1), callback_data=f"gen:schedtpl:{i}")
+        for i in range(len(options))
+    ]
+    await message.answer(
+        "Выберите вариант расписания:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+    )
+
+
+@router.callback_query(LetterGenStates.choosing_schedule_template, F.data.startswith("gen:schedtpl:"))
+async def choose_schedule_template(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    element = data["_schedule_template_list"][idx]
+    await state.update_data(schedule_template=element)
+    await callback.message.edit_text(f"Расписание: {element}")
+    await _ask_header(callback.message, state)
+    await callback.answer()
 
 
 @router.message(LetterGenStates.waiting_schedule_txt)
@@ -372,48 +399,63 @@ async def choose_footer(callback: CallbackQuery, state: FSMContext) -> None:
     element = data["_footer_list"][idx]
     await state.update_data(footer={"module": "Подвалы", "element": element})
     await callback.message.edit_text(f"Подвалы: {element}")
-    await _ask_content_module(callback.message, state)
+    await _ask_component_menu(callback.message, state)
     await callback.answer()
 
 
 # --- контентные компоненты (цикл) -------------------------------------------------
+#
+# Текущий режим: после обязательных компонентов показываются две кнопки —
+# «Добавить компонент» / «Завершить и скачать файл». Название компонента при
+# добавлении вводится текстом и ищется по manifest.json (gensvc.find_content_component),
+# после чего запускается тот же single-field flow, что и раньше. См. _ask_component_menu
+# и _add_component_by_name ниже.
 
-async def _ask_content_module(message: Message, state: FSMContext) -> None:
-    await state.update_data(step="choosing_content_module")
-    await state.set_state(LetterGenStates.choosing_content_module)
+async def _ask_component_menu(message: Message, state: FSMContext) -> None:
+    await state.update_data(step="choosing_add_more")
+    await state.set_state(LetterGenStates.choosing_add_more)
     await message.answer(
-        "Выберите компонент для содержимого:",
-        reply_markup=_idx_keyboard(gensvc.CONTENT_MODULES, "gen:module"),
+        "Контентные компоненты:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Добавить компонент", callback_data="gen:addcomp")],
+            [InlineKeyboardButton(text="Завершить и скачать файл", callback_data="gen:finish")],
+        ]),
     )
 
 
-@router.callback_query(LetterGenStates.choosing_content_module, F.data.startswith("gen:module:"))
-async def choose_content_module(callback: CallbackQuery, state: FSMContext) -> None:
-    idx = int(callback.data.split(":")[-1])
-    module = gensvc.CONTENT_MODULES[idx]
-    elements = gensvc.content_elements(module)
-
-    await state.update_data(_current_module=module, _element_list=elements, step="choosing_content_element")
-    await state.set_state(LetterGenStates.choosing_content_element)
-    await callback.message.edit_text(f"Модуль: {module}")
-    await callback.message.answer("Выберите элемент:", reply_markup=_idx_keyboard(elements, "gen:element"))
+@router.callback_query(LetterGenStates.choosing_add_more, F.data == "gen:addcomp")
+async def add_component_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(step="waiting_component_name")
+    await state.set_state(LetterGenStates.waiting_component_name)
+    await callback.message.edit_text("Добавление компонента.")
+    await callback.message.answer(
+        "Введите название компонента точно как в каталоге (manifest.json).",
+        reply_markup=cancel_keyboard,
+    )
     await callback.answer()
 
 
-@router.callback_query(LetterGenStates.choosing_content_element, F.data.startswith("gen:element:"))
-async def choose_content_element(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    idx = int(callback.data.split(":")[-1])
-    module = data["_current_module"]
-    element = data["_element_list"][idx]
-    count = gensvc.sample_text_count(module, element)
+@router.message(LetterGenStates.waiting_component_name, F.text)
+async def receive_component_name(message: Message, state: FSMContext) -> None:
+    await _add_component_by_name(message, state, message.text.strip())
 
-    await state.update_data(_current_element=element, _current_text_count=count)
-    await callback.message.edit_text(f"Компонент: {module} / {element}")
+
+async def _add_component_by_name(message: Message, state: FSMContext, name: str) -> None:
+    found = gensvc.find_content_component(name)
+    if found is None:
+        await message.answer(
+            "Компонент с таким названием не найден. Введите название точно как в "
+            "каталоге (manifest.json), или отправьте /cancel."
+        )
+        return
+
+    module, element = found
+    count = gensvc.sample_text_count(module, element)
+    await state.update_data(_current_module=module, _current_element=element, _current_text_count=count)
+    await message.answer(f"Компонент: {module} / {element}")
 
     if count == 0:
-        await _content_added(callback.message, state, module, element, [])
-        await callback.answer()
+        await _content_added(message, state, module, element, [])
         return
 
     single = component_fields.get_single_field(module, element)
@@ -431,11 +473,10 @@ async def choose_content_element(callback: CallbackQuery, state: FSMContext) -> 
             step="waiting_single_field_value",
         )
         await state.set_state(LetterGenStates.waiting_single_field_value)
-        await callback.message.answer(
+        await message.answer(
             f"<b>{html.escape(field_label)}</b>\nНапишите {field_label[0].lower()}{field_label[1:]}:",
             reply_markup=cancel_keyboard,
         )
-        await callback.answer()
         return
 
     # Безопасный откат: для компонентов без запланированного единственного поля
@@ -444,11 +485,83 @@ async def choose_content_element(callback: CallbackQuery, state: FSMContext) -> 
     # «N строк одним сообщением», без придуманных названий полей.
     await state.update_data(step="waiting_content_text")
     await state.set_state(LetterGenStates.waiting_content_text)
-    await callback.message.answer(
+    await message.answer(
         f"Введите содержимое компонента — {count} {_plural_stroki(count)}, каждая с новой строки.",
         reply_markup=cancel_keyboard,
     )
-    await callback.answer()
+
+
+# ===================================================================================
+# СТАРЫЙ flow «выбор модуля -> выбор элемента» кнопками (заменён вводом названия
+# компонента текстом выше) — оставлен закомментированным для быстрого возврата:
+# раскомментировать, вернуть вызов _ask_content_module(callback.message, state) вместо
+# _ask_component_menu(callback.message, state) в choose_footer выше, и вернуть вызов
+# _ask_content_module(callback.message, state) вместо _ask_component_menu(callback.message,
+# state) в add_more_yes ниже.
+# ===================================================================================
+#
+# async def _ask_content_module(message: Message, state: FSMContext) -> None:
+#     await state.update_data(step="choosing_content_module")
+#     await state.set_state(LetterGenStates.choosing_content_module)
+#     await message.answer(
+#         "Выберите компонент для содержимого:",
+#         reply_markup=_idx_keyboard(gensvc.CONTENT_MODULES, "gen:module"),
+#     )
+#
+#
+# @router.callback_query(LetterGenStates.choosing_content_module, F.data.startswith("gen:module:"))
+# async def choose_content_module(callback: CallbackQuery, state: FSMContext) -> None:
+#     idx = int(callback.data.split(":")[-1])
+#     module = gensvc.CONTENT_MODULES[idx]
+#     elements = gensvc.content_elements(module)
+#
+#     await state.update_data(_current_module=module, _element_list=elements, step="choosing_content_element")
+#     await state.set_state(LetterGenStates.choosing_content_element)
+#     await callback.message.edit_text(f"Модуль: {module}")
+#     await callback.message.answer("Выберите элемент:", reply_markup=_idx_keyboard(elements, "gen:element"))
+#     await callback.answer()
+#
+#
+# @router.callback_query(LetterGenStates.choosing_content_element, F.data.startswith("gen:element:"))
+# async def choose_content_element(callback: CallbackQuery, state: FSMContext) -> None:
+#     data = await state.get_data()
+#     idx = int(callback.data.split(":")[-1])
+#     module = data["_current_module"]
+#     element = data["_element_list"][idx]
+#     count = gensvc.sample_text_count(module, element)
+#
+#     await state.update_data(_current_element=element, _current_text_count=count)
+#     await callback.message.edit_text(f"Компонент: {module} / {element}")
+#
+#     if count == 0:
+#         await _content_added(callback.message, state, module, element, [])
+#         await callback.answer()
+#         return
+#
+#     single = component_fields.get_single_field(module, element)
+#     if single is not None:
+#         field_index, field_label = single
+#         demo_texts = gensvc.sample_texts(module, element)
+#         await state.update_data(
+#             _single_field_index=field_index,
+#             _demo_texts=demo_texts,
+#             step="waiting_single_field_value",
+#         )
+#         await state.set_state(LetterGenStates.waiting_single_field_value)
+#         await callback.message.answer(
+#             f"<b>{html.escape(field_label)}</b>\nНапишите {field_label[0].lower()}{field_label[1:]}:",
+#             reply_markup=cancel_keyboard,
+#         )
+#         await callback.answer()
+#         return
+#
+#     await state.update_data(step="waiting_content_text")
+#     await state.set_state(LetterGenStates.waiting_content_text)
+#     await callback.message.answer(
+#         f"Введите содержимое компонента — {count} {_plural_stroki(count)}, каждая с новой строки.",
+#         reply_markup=cancel_keyboard,
+#     )
+#     await callback.answer()
 
 
 @router.message(LetterGenStates.waiting_single_field_value, F.text)
@@ -566,35 +679,35 @@ async def _content_added(message: Message, state: FSMContext, module: str, eleme
     data = await state.get_data()
     blocks = data.get("content_blocks", [])
     blocks.append({"module": module, "element": element, "texts": texts})
-    await state.update_data(content_blocks=blocks, step="choosing_add_more")
-    await state.set_state(LetterGenStates.choosing_add_more)
+    await state.update_data(content_blocks=blocks)
     await message.answer(
         f"Компонент добавлен: {module} / {element}.\n"
-        f"Всего контентных компонентов: {len(blocks)}.\n\nДобавить ещё?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Да", callback_data="gen:more:yes")],
-            [InlineKeyboardButton(text="Нет — завершить", callback_data="gen:more:no")],
-        ]),
+        f"Всего контентных компонентов: {len(blocks)}."
     )
+    await _ask_component_menu(message, state)
 
 
-@router.callback_query(LetterGenStates.choosing_add_more, F.data == "gen:more:yes")
-async def add_more_yes(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.message.edit_text("Добавляю ещё один компонент...")
-    await _ask_content_module(callback.message, state)
-    await callback.answer()
-
-
-@router.callback_query(LetterGenStates.choosing_add_more, F.data == "gen:more:no")
-async def add_more_no(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.message.edit_text("Содержимое собрано.")
-    await callback.message.answer(
-        "Готово к сборке письма.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Завершить и скачать", callback_data="gen:finish"),
-        ]]),
-    )
-    await callback.answer()
+# СТАРЫЙ Да/Нет flow (заменён двумя кнопками «Добавить компонент» / «Завершить и
+# скачать файл» в _ask_component_menu выше) — оставлен закомментированным для
+# быстрого возврата вместе со старым flow «выбор модуля -> выбор элемента» выше.
+#
+# @router.callback_query(LetterGenStates.choosing_add_more, F.data == "gen:more:yes")
+# async def add_more_yes(callback: CallbackQuery, state: FSMContext) -> None:
+#     await callback.message.edit_text("Добавляю ещё один компонент...")
+#     await _ask_content_module(callback.message, state)
+#     await callback.answer()
+#
+#
+# @router.callback_query(LetterGenStates.choosing_add_more, F.data == "gen:more:no")
+# async def add_more_no(callback: CallbackQuery, state: FSMContext) -> None:
+#     await callback.message.edit_text("Содержимое собрано.")
+#     await callback.message.answer(
+#         "Готово к сборке письма.",
+#         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+#             InlineKeyboardButton(text="Завершить и скачать", callback_data="gen:finish"),
+#         ]]),
+#     )
+#     await callback.answer()
 
 
 # --- завершение --------------------------------------------------------------------
@@ -615,6 +728,7 @@ async def finish_generation(callback: CallbackQuery, state: FSMContext) -> None:
         "footer": data.get("footer"),
         "content_blocks": data.get("content_blocks", []),
         "schedule": data.get("schedule_enabled", False),
+        "schedule_template": data.get("schedule_template"),
     }
 
     try:

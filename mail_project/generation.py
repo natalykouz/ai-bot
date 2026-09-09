@@ -400,8 +400,9 @@ def _fill_schedule_event_slot(html: str, slot_n: int, event: dict) -> str:
     return html[:start] + block + html[end:]
 
 
-def build_schedule_blocks(library: ComponentLibrary, groups: list) -> list:
-    module, element = SCHEDULE_TEMPLATE["module"], SCHEDULE_TEMPLATE["element"]
+def build_schedule_blocks(library: ComponentLibrary, groups: list, element: str | None = None) -> list:
+    module = SCHEDULE_TEMPLATE["module"]
+    element = element or SCHEDULE_TEMPLATE["element"]
     library.entry(module, element)
     blocks = []
     for event_date, events in groups:
@@ -695,7 +696,7 @@ def run_selected(build_dir: Path, selection: dict) -> None:
                 errors.append("Schedule: SCHEDULE.txt не содержит ни одного события")
             else:
                 try:
-                    blocks.extend(build_schedule_blocks(library, groups))
+                    blocks.extend(build_schedule_blocks(library, groups, selection.get("schedule_template")))
                 except GenerationError as exc:
                     errors.append(str(exc))
 
