@@ -215,8 +215,39 @@ async def start_letter_gen(callback: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="Открыть каталог компонентов", url=settings.catalog_url),
             ]]),
         )
-    await callback.message.answer("Выберите филиал:", reply_markup=_idx_keyboard(branch_list, "gen:branch"))
+    await callback.message.answer(
+        "Выберите филиал:", reply_markup=_with_cancel_row(_idx_keyboard(branch_list, "gen:branch"))
+    )
     await callback.answer()
+
+
+def _with_cancel_row(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    """Добавляет строку с кнопкой «Отмена» (gen:cancel) под inline-клавиатурой шага
+    «Генерация письма» — единая точка прерывания flow на любом шаге с выбором
+    (филиал/расписание/шапка/hero/подвал/контентные компоненты), см. letter_gen_cancel."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=list(markup.inline_keyboard) + [[InlineKeyboardButton(text="Отмена", callback_data="gen:cancel")]]
+    )
+
+
+@router.callback_query(F.data == "gen:cancel")
+async def letter_gen_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Кнопка «Отмена» на inline-клавиатурах «Генерации письма» — прерывает flow
+    независимо от текущего шага (филиал/расписание/шапка/hero/подвал/контентные
+    компоненты) и возвращает в главное меню. Без фильтра по state — callback_data
+    уникален для этой кнопки."""
+    await callback.message.edit_text("Генерация письма прервана.")
+    await state.clear()
+    await callback.message.answer("Выберите действие:", reply_markup=main_menu_keyboard)
+    await callback.answer()
+
+
+async def _cancel_letter_gen(message: Message, state: FSMContext) -> None:
+    """Прерывание «Генерации письма» кнопкой «Отмена»/командой /cancel на шагах
+    ввода текста (SCHEDULE.txt, поле контентного компонента) — аналог
+    letter_gen_cancel выше для message-хендлеров вместо callback."""
+    await state.clear()
+    await message.answer("Генерация письма прервана.", reply_markup=main_menu_keyboard)
 
 
 @router.callback_query(LetterGenStates.choosing_branch, F.data.startswith("gen:branch:"))
@@ -253,10 +284,10 @@ async def _ask_schedule_choice(message: Message, state: FSMContext) -> None:
     await state.set_state(LetterGenStates.choosing_schedule_choice)
     await message.answer(
         "Использовать расписание?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        reply_markup=_with_cancel_row(InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Да", callback_data="gen:sched:yes"),
             InlineKeyboardButton(text="Нет", callback_data="gen:sched:no"),
-        ]]),
+        ]])),
     )
 
 
@@ -316,7 +347,7 @@ async def _ask_schedule_template(message: Message, state: FSMContext) -> None:
     ]
     await message.answer(
         "Выберите вариант расписания:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+        reply_markup=_with_cancel_row(InlineKeyboardMarkup(inline_keyboard=[buttons])),
     )
 
 
@@ -329,6 +360,12 @@ async def choose_schedule_template(callback: CallbackQuery, state: FSMContext) -
     await callback.message.edit_text(f"Расписание: {element}")
     await _ask_header(callback.message, state)
     await callback.answer()
+
+
+@router.message(LetterGenStates.waiting_schedule_txt, F.text == "Отмена")
+@router.message(LetterGenStates.waiting_schedule_txt, Command("cancel"))
+async def cancel_waiting_schedule_txt(message: Message, state: FSMContext) -> None:
+    await _cancel_letter_gen(message, state)
 
 
 @router.message(LetterGenStates.waiting_schedule_txt)
@@ -353,7 +390,9 @@ async def _ask_header(message: Message, state: FSMContext) -> None:
 
     await state.update_data(_header_list=options, step="choosing_header")
     await state.set_state(LetterGenStates.choosing_header)
-    await message.answer("Выберите компонент Шапки:", reply_markup=_idx_keyboard(options, "gen:header"))
+    await message.answer(
+        "Выберите компонент Шапки:", reply_markup=_with_cancel_row(_idx_keyboard(options, "gen:header"))
+    )
 
 
 @router.callback_query(LetterGenStates.choosing_header, F.data.startswith("gen:header:"))
@@ -371,7 +410,9 @@ async def _ask_hero(message: Message, state: FSMContext) -> None:
     options = gensvc.hero_options()
     await state.update_data(_hero_list=options, step="choosing_hero")
     await state.set_state(LetterGenStates.choosing_hero)
-    await message.answer("Выберите компонент Баннеры:", reply_markup=_idx_keyboard(options, "gen:hero"))
+    await message.answer(
+        "Выберите компонент Баннеры:", reply_markup=_with_cancel_row(_idx_keyboard(options, "gen:hero"))
+    )
 
 
 @router.callback_query(LetterGenStates.choosing_hero, F.data.startswith("gen:hero:"))
@@ -399,7 +440,9 @@ async def _ask_footer(message: Message, state: FSMContext) -> None:
 
     await state.update_data(_footer_list=options, step="choosing_footer")
     await state.set_state(LetterGenStates.choosing_footer)
-    await message.answer("Выберите компонент Подвалы:", reply_markup=_idx_keyboard(options, "gen:footer"))
+    await message.answer(
+        "Выберите компонент Подвалы:", reply_markup=_with_cancel_row(_idx_keyboard(options, "gen:footer"))
+    )
 
 
 @router.callback_query(LetterGenStates.choosing_footer, F.data.startswith("gen:footer:"))
@@ -426,10 +469,10 @@ async def _ask_component_menu(message: Message, state: FSMContext) -> None:
     await state.set_state(LetterGenStates.choosing_add_more)
     await message.answer(
         "Контентные компоненты:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        reply_markup=_with_cancel_row(InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Добавить компонент", callback_data="gen:addcomp")],
             [InlineKeyboardButton(text="Завершить и скачать файл", callback_data="gen:finish")],
-        ]),
+        ])),
     )
 
 
@@ -590,6 +633,12 @@ async def _add_component_by_name(message: Message, state: FSMContext, name: str)
 #     await callback.answer()
 
 
+@router.message(LetterGenStates.waiting_single_field_value, F.text == "Отмена")
+@router.message(LetterGenStates.waiting_single_field_value, Command("cancel"))
+async def cancel_waiting_single_field_value(message: Message, state: FSMContext) -> None:
+    await _cancel_letter_gen(message, state)
+
+
 @router.message(LetterGenStates.waiting_single_field_value, F.text)
 async def receive_single_field_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -681,6 +730,12 @@ async def receive_single_field_value(message: Message, state: FSMContext) -> Non
 #     await callback.message.edit_text("Заполняю компонент заново.")
 #     await _ask_next_field(callback.message, state)
 #     await callback.answer()
+
+
+@router.message(LetterGenStates.waiting_content_text, F.text == "Отмена")
+@router.message(LetterGenStates.waiting_content_text, Command("cancel"))
+async def cancel_waiting_content_text(message: Message, state: FSMContext) -> None:
+    await _cancel_letter_gen(message, state)
 
 
 @router.message(LetterGenStates.waiting_content_text, F.text)
