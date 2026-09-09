@@ -442,6 +442,15 @@ async def add_component_start(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+@router.message(LetterGenStates.waiting_component_name, Command("cancel"))
+async def cancel_add_component(message: Message, state: FSMContext) -> None:
+    """/cancel в этом состоянии отменяет только ввод названия компонента и
+    возвращает в меню «Добавить компонент» / «Завершить и скачать файл», а не
+    сбрасывает всю сборку письма (в отличие от глобального /cancel в contract.py)."""
+    await message.answer("Добавление компонента отменено.")
+    await _ask_component_menu(message, state)
+
+
 @router.message(LetterGenStates.waiting_component_name, F.text)
 async def receive_component_name(message: Message, state: FSMContext) -> None:
     await _add_component_by_name(message, state, message.text.strip())
