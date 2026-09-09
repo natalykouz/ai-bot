@@ -24,7 +24,8 @@ from services import auth_service
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Проверка договоров")],
-        [KeyboardButton(text="Форматирование HTML страниц")]
+        [KeyboardButton(text="Форматирование HTML страниц")],
+        [KeyboardButton(text="Email-рассылки")]
     ],
     resize_keyboard=True
 )
@@ -110,7 +111,10 @@ ADMIN_INFO_TEXT = (
     "Добавить администратора:\n"
     "<code>/addadmin user_id</code>\n\n"
     "Удалить администратора:\n"
-    "<code>/removeadmin user_id</code>"
+    "<code>/removeadmin user_id</code>\n\n"
+    "Удалить сборки Email-рассылок старше N дней (по умолчанию 7):\n"
+    "<code>/cleanupbuilds</code>\n"
+    "<code>/cleanupbuilds 14</code>"
 )
 
 

@@ -1,0 +1,18 @@
+[
+  {
+    "slot_id": "hero_01",
+    "block": "hero",
+    "purpose": "Hero — главное изображение выпуска",
+    "alt": "Иллюстрация к материалу «Москва глазами инженера: интеграционный тест v1»",
+    "source": "https://cdn.engineer-history.ru/issues/integration-test/hero.jpg",
+    "width": 536
+  },
+  {
+    "slot_id": "card_01",
+    "block": "card_1",
+    "purpose": "Card — изображение материала «Архитектура для жизни. Экскурсия про модерн на Пречистенке»",
+    "alt": "Иллюстрация к материалу «Архитектура для жизни. Экскурсия про модерн на Пречистенке»",
+    "source": "https://cdn.engineer-history.ru/issues/integration-test/card-1.jpg",
+    "width": 260
+  }
+]

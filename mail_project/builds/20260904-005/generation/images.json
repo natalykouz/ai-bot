@@ -1,0 +1,18 @@
+[
+  {
+    "slot_id": "hero_01",
+    "block": "hero",
+    "purpose": "Hero — главное изображение выпуска",
+    "alt": "Иллюстрация Hero-блока выпуска",
+    "source": null,
+    "width": 86
+  },
+  {
+    "slot_id": "content_01",
+    "block": "content_1",
+    "purpose": "Баннеры/Вариант 4 — изображение материала",
+    "alt": "Иллюстрация к материалу «Ура!»",
+    "source": null,
+    "width": 536
+  }
+]

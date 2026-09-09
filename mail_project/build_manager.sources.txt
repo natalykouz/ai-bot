@@ -1,0 +1,16 @@
+# Build Manager v1 — фиксированный source set (см. BUILD_MANAGER.md)
+# Один путь на строку, относительно mail_project/. Строки с # игнорируются.
+
+EVENTS_RULES.md
+GENERATION_RULES.md
+QA_RULES.md
+IMAGE_SLOTS.md
+TEMPLATE_SPEC.md
+CONTENT_SCHEMA.md
+UTM.md
+VARIABLES.md
+MGI_UNISENDER_ASSETS.md
+README.md
+manifest.json
+unisender_components.zip
+tour_links.csv

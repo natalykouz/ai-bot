@@ -1,0 +1,159 @@
+SCHEDULE
+
+DATE: 20.09.2026
+
+EVENT
+event_id: 9001
+tour_id: 47
+time: 11:00
+title: Числовой код филиала
+link: https://engineer-history.ru/tour/kievskii-vokzal?startDate=2026-09-20&event_id=9001&utm_source=emailmgi
+
+EVENT
+event_id: 9002
+tour_id: 56
+time: 14:00
+title: Казань числовым кодом
+link: https://engineer-history.ru/tour/krasnii-oktyabr?startDate=2026-09-20&event_id=9002&utm_source=email_kgi
+
+DATE: 21.09.2026
+
+EVENT
+event_id: 9112
+tour_id: 57
+time: 08:24
+title: Событие лимита 12
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9112&utm_source=emailmgi
+
+EVENT
+event_id: 9124
+tour_id: 57
+time: 08:48
+title: Событие лимита 24
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9124&utm_source=emailmgi
+
+EVENT
+event_id: 9113
+tour_id: 57
+time: 09:31
+title: Событие лимита 13
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9113&utm_source=emailmgi
+
+EVENT
+event_id: 9114
+tour_id: 57
+time: 10:38
+title: Событие лимита 14
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9114&utm_source=emailmgi
+
+EVENT
+event_id: 9115
+tour_id: 57
+time: 11:45
+title: Событие лимита 15
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9115&utm_source=emailmgi
+
+EVENT
+event_id: 9116
+tour_id: 57
+time: 12:52
+title: Событие лимита 16
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9116&utm_source=emailmgi
+
+EVENT
+event_id: 9105
+tour_id: 57
+time: 13:35
+title: Событие лимита 5
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9105&utm_source=emailmgi
+
+EVENT
+event_id: 9117
+tour_id: 57
+time: 13:59
+title: Событие лимита 17
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9117&utm_source=emailmgi
+
+EVENT
+event_id: 9118
+tour_id: 57
+time: 14:06
+title: Событие лимита 18
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9118&utm_source=emailmgi
+
+EVENT
+event_id: 9106
+tour_id: 57
+time: 14:42
+title: Событие лимита 6
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9106&utm_source=emailmgi
+
+EVENT
+event_id: 9119
+tour_id: 57
+time: 15:13
+title: Событие лимита 19
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9119&utm_source=emailmgi
+
+EVENT
+event_id: 9107
+tour_id: 57
+time: 15:49
+title: Событие лимита 7
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9107&utm_source=emailmgi
+
+EVENT
+event_id: 9120
+tour_id: 57
+time: 16:20
+title: Событие лимита 20
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9120&utm_source=emailmgi
+
+EVENT
+event_id: 9108
+tour_id: 57
+time: 16:56
+title: Событие лимита 8
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9108&utm_source=emailmgi
+
+EVENT
+event_id: 9109
+tour_id: 57
+time: 17:03
+title: Событие лимита 9
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9109&utm_source=emailmgi
+
+EVENT
+event_id: 9121
+tour_id: 57
+time: 17:27
+title: Событие лимита 21
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9121&utm_source=emailmgi
+
+EVENT
+event_id: 9110
+tour_id: 57
+time: 18:10
+title: Событие лимита 10
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9110&utm_source=emailmgi
+
+EVENT
+event_id: 9122
+tour_id: 57
+time: 18:34
+title: Событие лимита 22
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9122&utm_source=emailmgi
+
+EVENT
+event_id: 9111
+tour_id: 57
+time: 19:17
+title: Событие лимита 11
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9111&utm_source=emailmgi
+
+EVENT
+event_id: 9123
+tour_id: 57
+time: 19:41
+title: Событие лимита 23
+link: https://engineer-history.ru/tour/biblioteka-imeni-lenina?startDate=2026-09-21&event_id=9123&utm_source=emailmgi

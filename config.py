@@ -31,11 +31,27 @@ CONTRACT_CHECK_PROMPT = load_prompt("contract_check.txt")
 HTML_FORMAT_PROMPT = load_prompt("html_format.txt")
 
 
+def _catalog_url() -> str:
+    """Публичный URL каталога компонентов (см. services/catalog_server.py).
+    CATALOG_URL — ручной override. Иначе, если Railway выдал сервису публичный
+    домен, он автоматически лежит в RAILWAY_PUBLIC_DOMAIN — используем его.
+    Если ни того, ни другого нет (например, локальный запуск без домена),
+    возвращаем пустую строку — вызывающий код должен считать ссылку недоступной."""
+    manual = os.getenv("CATALOG_URL")
+    if manual:
+        return manual
+    domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    if domain:
+        return f"https://{domain}/catalog"
+    return ""
+
+
 @dataclass
 class Settings:
     bot_token: str
     openai_api_key: str
     openai_model: str
+    catalog_url: str
 
 
 def _load_settings() -> Settings:
@@ -53,6 +69,7 @@ def _load_settings() -> Settings:
         bot_token=bot_token,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
+        catalog_url=_catalog_url(),
     )
 
 
