@@ -174,9 +174,30 @@ async def add_input(build_id: str, file_path: Path) -> None:
     await _run_build_manager("add-input", build_id, str(file_path))
 
 
-async def run_schedule(build_id: str) -> str:
-    """Запускает Schedule v1 (build_manager.py schedule) над XLSX, уже добавленным через add_input()."""
-    return await _run_build_manager("schedule", build_id)
+async def run_schedule(build_id: str, min_free_percent: float) -> str:
+    """Запускает Schedule v1 (build_manager.py schedule) над XLSX, уже добавленным через add_input().
+    min_free_percent — порог % свободных билетов, указанный СММ (0-100). Безопасно
+    вызывать повторно на том же build_id — XLSX остаётся в input/, Google Sheets
+    перечитывается заново при каждом вызове (используется для «Перегенерировать
+    расписание», см. handlers/generation.py); порог при этом передаётся тот же,
+    что был указан при первом запуске."""
+    return await _run_build_manager("schedule", build_id, "--min-free-percent", str(min_free_percent))
+
+
+def missing_events_from_output(output: str) -> list:
+    """Разбирает строку `MISSING_IN_SHEET_JSON: [...]` из stdout run_schedule() —
+    мероприятия расписания, чей ID тура не найден в Google Sheets листе своего
+    филиала (schedule_processor.filter_events()). [] если строка не найдена
+    или список пуст."""
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("MISSING_IN_SHEET_JSON:"):
+            payload = line.split(":", 1)[1].strip()
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return []
+    return []
 
 
 async def verify_build(build_id: str) -> None:

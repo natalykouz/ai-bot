@@ -50,8 +50,14 @@ cancel_keyboard = ReplyKeyboardMarkup(
 
 
 class ScheduleGenStates(StatesGroup):
-    """Самостоятельный flow «Генерация расписания»."""
+    """Самостоятельный flow «Генерация расписания» — после XLSX СММ указывает
+    порог % свободных билетов (waiting_free_percent, хранится в state и
+    переиспользуется при перегенерации без повторного вопроса); после генерации
+    СММ может сколько угодно раз перегенерировать (reviewing_schedule), см.
+    _deliver_schedule_result()."""
     waiting_xlsx = State()
+    waiting_free_percent = State()
+    reviewing_schedule = State()
 
 
 class LetterGenStates(StatesGroup):
@@ -159,7 +165,6 @@ async def schedule_gen_receive_xlsx(message: Message, state: FSMContext) -> None
     try:
         build_id = await gensvc.create_build()
         await gensvc.add_input(build_id, tmp_path)
-        output = await gensvc.run_schedule(build_id)
     except gensvc.GenerationServiceError as exc:
         await message.answer(f"Не удалось построить расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel.")
         return
@@ -170,14 +175,124 @@ async def schedule_gen_receive_xlsx(message: Message, state: FSMContext) -> None
         except OSError:
             pass
 
+    await state.update_data(build_id=build_id)
+    await _ask_free_percent(message, state)
+
+
+async def _ask_free_percent(message: Message, state: FSMContext) -> None:
+    await state.set_state(ScheduleGenStates.waiting_free_percent)
+    await message.answer(
+        "Какой процент свободных билетов должен быть у мероприятия, чтобы оно попало в расписание?\n\n"
+        "Например, если указать 50, в расписание попадут мероприятия, где свободно больше 50% билетов.\n\n"
+        "Введите число от 0 до 100.",
+        reply_markup=cancel_keyboard,
+    )
+
+
+@router.message(ScheduleGenStates.waiting_free_percent, F.text == "Отмена")
+@router.message(ScheduleGenStates.waiting_free_percent, Command("cancel"))
+async def schedule_gen_cancel_percent(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Генерация расписания отменена.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleGenStates.waiting_free_percent, F.text)
+async def schedule_gen_receive_percent(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip().replace(",", ".")
+    try:
+        percent = float(text)
+    except ValueError:
+        await message.answer("Нужно число от 0 до 100. Введите процент ещё раз.")
+        return
+    if not (0 <= percent <= 100):
+        await message.answer("Нужно число от 0 до 100. Введите процент ещё раз.")
+        return
+
+    data = await state.get_data()
+    build_id = data["build_id"]
+    await state.update_data(min_free_percent=percent)
+
+    await message.answer("Строю расписание...")
+    try:
+        output = await gensvc.run_schedule(build_id, percent)
+    except gensvc.GenerationServiceError as exc:
+        await state.set_state(ScheduleGenStates.waiting_xlsx)
+        await message.answer(f"Не удалось построить расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel.")
+        return
+
+    await _deliver_schedule_result(message, state, build_id, output)
+
+
+@router.message(ScheduleGenStates.waiting_free_percent)
+async def schedule_gen_percent_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю число от 0 до 100. Или отправьте /cancel для отмены.")
+
+
+async def _deliver_schedule_result(message: Message, state: FSMContext, build_id: str, output: str) -> None:
+    """Выдаёт SCHEDULE.txt и предлагает «Перегенерировать»/«Оставить как есть» —
+    вызывается и после первой генерации, и после каждой перегенерации
+    (schedule_gen_regen). Список мероприятий, отсутствующих в Google Sheets,
+    определяется заново из output каждый раз, отдельно не хранится. Файл
+    выдаётся всегда, независимо от того, есть такие мероприятия или нет."""
     schedule_path = gensvc.build_dir_for(build_id) / "schedule" / "SCHEDULE.txt"
     summary_line = _find_line(output, "Дат:")
     await message.answer_document(
         BufferedInputFile(schedule_path.read_bytes(), filename="SCHEDULE.txt"),
         caption=f"BUILD_ID: {build_id}. {summary_line}".strip(),
     )
+
+    missing = gensvc.missing_events_from_output(output)
+    if missing:
+        lines = ["Не найдены в Google Sheets (использованы название/ссылка из выгрузки):"]
+        lines.extend(
+            f"- {item['branch']}, ID тура {item['tour_id']}: {item['title']}"
+            for item in missing
+        )
+        await message.answer("\n".join(lines))
+
+    await state.set_state(ScheduleGenStates.reviewing_schedule)
+    await message.answer(
+        "Что дальше?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
+            [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
+        ]),
+    )
+
+
+@router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:regen")
+async def schedule_gen_regen(callback: CallbackQuery, state: FSMContext) -> None:
+    """Перегенерация поверх того же build/XLSX и того же порога % свободных
+    билетов (СММ не спрашивают заново) — заново читает Google Sheets
+    (run_schedule запускает schedule_processor.run() с нуля) и заново выдаёт
+    файл/список/кнопки. Цикл может повторяться сколько угодно раз."""
+    data = await state.get_data()
+    build_id = data["build_id"]
+    percent = data["min_free_percent"]
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Перегенерирую расписание...")
+    try:
+        output = await gensvc.run_schedule(build_id, percent)
+    except gensvc.GenerationServiceError as exc:
+        await callback.message.answer(
+            f"Не удалось перегенерировать расписание:\n{exc}\n\nПредыдущий файл остаётся в силе.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
+                [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
+            ]),
+        )
+        await callback.answer()
+        return
+    await _deliver_schedule_result(callback.message, state, build_id, output)
+    await callback.answer()
+
+
+@router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:keep")
+async def schedule_gen_keep(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_reply_markup(reply_markup=None)
     await state.clear()
-    await message.answer("Готово.", reply_markup=main_menu_keyboard)
+    await callback.message.answer("Готово.", reply_markup=main_menu_keyboard)
+    await callback.answer()
 
 
 @router.message(ScheduleGenStates.waiting_xlsx, F.text == "Отмена")

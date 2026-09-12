@@ -2,12 +2,16 @@
 
 Правила обработки — EVENTS_RULES.md (единственный источник бизнес-правил).
 Основной источник базовых ссылок и Заголовка/Подзаголовка мероприятия — Google
-Sheets, один HTTP-запрос за запуск, см. load_tour_sheet_data() и переменную
-окружения TOUR_LINKS_SHEET_CSV_URL. tour_links.csv/load_tour_links() — локальный
-справочник ссылок, оставлен в коде, но в run() больше не вызывается (см. ниже).
+Sheets: отдельный опубликованный лист на каждый филиал (Москва/Петербург/Казань),
+выбирается по полю `Филиал` события, см. BRANCH_SHEET_URL_ENV_BY_UTM_SOURCE и
+_get_branch_sheet_data(). Не более одного HTTP-запроса на филиал за запуск
+(результат кэшируется в filter_events()). tour_links.csv/load_tour_links() —
+локальный справочник ссылок, оставлен в коде, но в run() больше не вызывается
+(см. ниже).
 """
 
 import csv
+import json
 import os
 import re
 import sys
@@ -21,8 +25,16 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 import openpyxl
 
 TOUR_LINKS_FILENAME = "tour_links.csv"
-TOUR_LINKS_SHEET_URL_ENV = "TOUR_LINKS_SHEET_CSV_URL"
 TOUR_LINKS_SHEET_TIMEOUT = 5
+
+# Один опубликованный Google Sheets лист на филиал (раздел 6/7 EVENTS_RULES.md).
+# Ключ — utm_source филиала (см. _resolve_branch_utm_source), т.к. он уже
+# однозначно соответствует Москве/Петербургу/Казани.
+BRANCH_SHEET_URL_ENV_BY_UTM_SOURCE = {
+    "emailmgi": "TOUR_LINKS_SHEET_CSV_URL_MOSCOW",
+    "mail_pgi": "TOUR_LINKS_SHEET_CSV_URL_SPB",
+    "email_kgi": "TOUR_LINKS_SHEET_CSV_URL_KAZAN",
+}
 
 REQUIRED_COLUMNS = [
     "ID события",
@@ -39,6 +51,15 @@ REQUIRED_COLUMNS = [
 MAX_EVENTS_PER_DATE = 20
 FALLBACK_URL_TEMPLATE = "https://engineer-history.ru/tour/{tour_id}"
 
+# Фallback-ссылка тура по филиалу (используется, когда тур не найден в
+# соответствующем Google Sheets листе филиала) — ключ, как и у
+# BRANCH_SHEET_URL_ENV_BY_UTM_SOURCE, это utm_source филиала.
+FALLBACK_URL_TEMPLATE_BY_UTM_SOURCE = {
+    "emailmgi": "https://engineer-history.ru/tour/{tour_id}",
+    "mail_pgi": "https://spb.engineer-history.ru/tour/{tour_id}",
+    "email_kgi": "https://kzn.engineer-history.ru/tour/{tour_id}",
+}
+
 # EVENTS_RULES.md, раздел 6 — числовой код филиала.
 BRANCH_UTM_SOURCE_BY_CODE = {
     2: "emailmgi",
@@ -52,6 +73,13 @@ BRANCH_UTM_SOURCE_BY_NAME = {
     "москва": "emailmgi",
     "санкт-петербург": "mail_pgi",
     "казань": "email_kgi",
+}
+
+# Человекочитаемое название филиала для списка "нет в Google Sheets" (см. run()).
+BRANCH_NAME_BY_UTM_SOURCE = {
+    "emailmgi": "Москва",
+    "mail_pgi": "Санкт-Петербург",
+    "email_kgi": "Казань",
 }
 
 
@@ -146,6 +174,17 @@ def load_tour_sheet_data(url: str | None, timeout: float = TOUR_LINKS_SHEET_TIME
         titles[tour_id] = {"title": title or None, "subtitle": subtitle or None}
 
     return links, titles
+
+
+def _get_branch_sheet_data(utm_source: str, cache: dict) -> tuple:
+    """(tour_links, tour_titles) для филиала, соответствующего utm_source —
+    один HTTP-запрос на филиал за запуск, результат кэшируется в `cache`
+    (создаётся в filter_events() и живёт на время одного вызова)."""
+    if utm_source not in cache:
+        env_name = BRANCH_SHEET_URL_ENV_BY_UTM_SOURCE.get(utm_source)
+        url = os.getenv(env_name) if env_name else None
+        cache[utm_source] = load_tour_sheet_data(url)
+    return cache[utm_source]
 
 
 def _is_blank(value) -> bool:
@@ -243,7 +282,8 @@ def load_xlsx_rows(path: Path) -> list:
 
 
 def _build_link(tour_id: int, event_id: int, event_date: date_cls, utm_source: str, tour_links: dict) -> str:
-    base = tour_links.get(str(tour_id)) or FALLBACK_URL_TEMPLATE.format(tour_id=tour_id)
+    fallback_template = FALLBACK_URL_TEMPLATE_BY_UTM_SOURCE.get(utm_source, FALLBACK_URL_TEMPLATE)
+    base = tour_links.get(str(tour_id)) or fallback_template.format(tour_id=tour_id)
 
     parsed = urlparse(base)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -259,7 +299,7 @@ def _build_link(tour_id: int, event_id: int, event_date: date_cls, utm_source: s
     return urlunparse(parsed._replace(query=new_qs))
 
 
-def _build_event(row: dict, tour_links: dict, tour_titles: dict):
+def _build_event(row: dict, sheet_cache: dict, min_free_ratio: float):
     event_id = _to_int_or_none(row.get("ID события"))
     tour_id = _to_int_or_none(row.get("ID тура"))
     dt = _parse_datetime_cell(row.get("Дата"))
@@ -281,16 +321,22 @@ def _build_event(row: dict, tour_links: dict, tour_titles: dict):
     if private is not None and str(private).strip() == "Ч":
         return None
 
-    # Раздел 2, п.3 + Раздел 2, последний абзац.
+    # Раздел 2, п.3 + Раздел 2, последний абзац. Порог задаёт СММ при запуске
+    # генерации расписания (min_free_ratio = введённый процент / 100), см. run().
     if total is None or total == 0 or remaining is None:
         return None
-    if not (remaining / total > 0.5):
+    if not (remaining / total > min_free_ratio):
         return None
 
     # Раздел 6: другие значения Филиал не обрабатываются в этом формате.
     utm_source = _resolve_branch_utm_source(row.get("Филиал"))
     if utm_source is None:
         return None
+
+    # Google Sheets лист выбирается по тому же Филиал (раздел 6/7 EVENTS_RULES.md):
+    # у каждого филиала свой опубликованный лист с базовыми ссылками и
+    # Заголовком/Подзаголовком тура.
+    tour_links, tour_titles = _get_branch_sheet_data(utm_source, sheet_cache)
 
     link = _build_link(tour_id, event_id, dt.date(), utm_source, tour_links)
 
@@ -300,7 +346,9 @@ def _build_event(row: dict, tour_links: dict, tour_titles: dict):
     # названия — здесь никакого автоматического разбиения XLSX-названия на
     # заголовок/подзаголовок не производится, только опциональная подмена
     # целиком данными из таблицы.
-    sheet_meta = tour_titles.get(str(tour_id)) or {}
+    sheet_meta = tour_titles.get(str(tour_id))
+    found_in_sheet = sheet_meta is not None
+    sheet_meta = sheet_meta or {}
     display_title = sheet_meta.get("title") or str(title).strip()
     subtitle = sheet_meta.get("subtitle")
 
@@ -313,16 +361,37 @@ def _build_event(row: dict, tour_links: dict, tour_titles: dict):
         "subtitle": subtitle,
         "remaining": remaining,
         "link": link,
+        "_utm_source": utm_source,
+        "_found_in_sheet": found_in_sheet,
     }
 
 
-def filter_events(rows: list, tour_links: dict, tour_titles: dict) -> list:
+def filter_events(rows: list, min_free_ratio: float) -> tuple:
+    """(events, missing) — missing: мероприятия, попавшие в расписание, чей ID
+    тура не найден ни в одной строке Google Sheets листа своего филиала
+    (использован fallback из XLSX/FALLBACK_URL_TEMPLATE_BY_UTM_SOURCE).
+    Список определяется заново при каждом вызове, отдельно не хранится."""
+    sheet_cache = {}
     events = []
+    missing_seen = set()
+    missing = []
     for row in rows:
-        event = _build_event(row, tour_links, tour_titles)
-        if event is not None:
-            events.append(event)
-    return events
+        event = _build_event(row, sheet_cache, min_free_ratio)
+        if event is None:
+            continue
+        utm_source = event.pop("_utm_source")
+        found_in_sheet = event.pop("_found_in_sheet")
+        if not found_in_sheet:
+            key = (utm_source, event["tour_id"])
+            if key not in missing_seen:
+                missing_seen.add(key)
+                missing.append({
+                    "branch": BRANCH_NAME_BY_UTM_SOURCE.get(utm_source, utm_source),
+                    "tour_id": event["tour_id"],
+                    "title": event["title"],
+                })
+        events.append(event)
+    return events, missing
 
 
 def group_and_limit(events: list) -> list:
@@ -362,7 +431,10 @@ def render_schedule(grouped: list) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(build_dir: Path) -> None:
+def run(build_dir: Path, min_free_percent: float = 50.0) -> None:
+    """min_free_percent — процент свободных билетов, указанный СММ при запуске
+    генерации расписания (Раздел 2, п.3 EVENTS_RULES.md); значение по умолчанию
+    50.0 сохраняет прежнее фиксированное поведение для вызовов без параметра."""
     input_dir = build_dir / "input"
     xlsx_files = sorted(input_dir.glob("*.xlsx")) if input_dir.exists() else []
 
@@ -386,8 +458,7 @@ def run(build_dir: Path) -> None:
         print(INVALID_STRUCTURE_MESSAGE)
         sys.exit(1)
 
-    tour_links, tour_titles = load_tour_sheet_data(os.getenv(TOUR_LINKS_SHEET_URL_ENV))
-    events = filter_events(rows, tour_links, tour_titles)
+    events, missing = filter_events(rows, min_free_percent / 100)
     grouped = group_and_limit(events)
     schedule_text = render_schedule(grouped)
 
@@ -399,3 +470,6 @@ def run(build_dir: Path) -> None:
     total_events = sum(len(day_events) for _, day_events in grouped)
     print(f"SCHEDULE.txt создан: {schedule_path}")
     print(f"  Дат: {len(grouped)}, событий: {total_events}")
+    # Машиночитаемая строка для вызывающей стороны (services/generation_service.py
+    # missing_events_from_output()) — печатается всегда, даже при пустом списке.
+    print(f"MISSING_IN_SHEET_JSON: {json.dumps(missing, ensure_ascii=False)}")
