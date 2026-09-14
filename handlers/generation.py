@@ -62,6 +62,7 @@ class ScheduleGenStates(StatesGroup):
 
 class LetterGenStates(StatesGroup):
     """Самостоятельный flow «Генерация письма» (без обработки XLSX/Schedule processor)."""
+    waiting_subject = State()
     choosing_branch = State()
     choosing_schedule_choice = State()
     waiting_schedule_txt = State()
@@ -319,8 +320,8 @@ async def schedule_gen_wrong_input(message: Message) -> None:
 async def start_letter_gen(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     branch_list = gensvc.branches()
-    await state.update_data(step="choosing_branch", _branch_list=branch_list)
-    await state.set_state(LetterGenStates.choosing_branch)
+    await state.update_data(step="waiting_subject", _branch_list=branch_list)
+    await state.set_state(LetterGenStates.waiting_subject)
     await callback.message.edit_text("Генерация письма.")
     # Кнопка «Отмена» в нижней клавиатуре (тот же cancel_keyboard, что и в
     # «Генерации расписания») — показывается один раз здесь и остаётся видимой
@@ -329,7 +330,7 @@ async def start_letter_gen(callback: CallbackQuery, state: FSMContext) -> None:
     # расписание/шапка/hero/подвал/меню компонентов) у generation.router нет своего
     # message-хендлера — «Отмена»/​/cancel там уже сами уходят в общий /cancel из
     # contract.py. Явные хендлеры нужны только там, где catch-all перехватывает
-    # текст раньше (SCHEDULE.txt, поле компонента) — см. _cancel_letter_gen ниже.
+    # текст раньше (SCHEDULE.txt, поле компонента, тема письма) — см. _cancel_letter_gen ниже.
     await callback.message.answer(
         "Чтобы прервать генерацию письма в любой момент — нажмите «Отмена» или отправьте /cancel.",
         reply_markup=cancel_keyboard,
@@ -342,7 +343,7 @@ async def start_letter_gen(callback: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="Открыть каталог компонентов", url=settings.catalog_url),
             ]]),
         )
-    await callback.message.answer("Выберите филиал:", reply_markup=_idx_keyboard(branch_list, "gen:branch"))
+    await callback.message.answer("Введите тему письма:")
     await callback.answer()
 
 
@@ -351,6 +352,31 @@ async def _cancel_letter_gen(message: Message, state: FSMContext) -> None:
     точка выхода из flow независимо от текущего шага, возвращает в главное меню."""
     await state.clear()
     await message.answer("Генерация письма прервана.", reply_markup=main_menu_keyboard)
+
+
+@router.message(LetterGenStates.waiting_subject, F.text == "Отмена")
+@router.message(LetterGenStates.waiting_subject, Command("cancel"))
+async def cancel_waiting_subject(message: Message, state: FSMContext) -> None:
+    await _cancel_letter_gen(message, state)
+
+
+@router.message(LetterGenStates.waiting_subject, F.text)
+async def receive_subject(message: Message, state: FSMContext) -> None:
+    subject = message.text.strip()
+    if not subject:
+        await message.answer("Тема письма не может быть пустой. Введите тему письма:")
+        return
+
+    data = await state.get_data()
+    branch_list = data["_branch_list"]
+    await state.update_data(subject=subject, step="choosing_branch")
+    await state.set_state(LetterGenStates.choosing_branch)
+    await message.answer("Выберите филиал:", reply_markup=_idx_keyboard(branch_list, "gen:branch"))
+
+
+@router.message(LetterGenStates.waiting_subject)
+async def waiting_subject_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю текст темы письма. Или отправьте /cancel для отмены.")
 
 
 @router.callback_query(LetterGenStates.choosing_branch, F.data.startswith("gen:branch:"))
@@ -908,6 +934,7 @@ async def finish_generation(callback: CallbackQuery, state: FSMContext) -> None:
         "content_blocks": data.get("content_blocks", []),
         "schedule": data.get("schedule_enabled", False),
         "schedule_template": data.get("schedule_template"),
+        "subject": data.get("subject"),
     }
 
     try:

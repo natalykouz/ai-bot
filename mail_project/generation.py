@@ -565,13 +565,14 @@ def build_schedule_blocks(library: ComponentLibrary, groups: list, element: str 
     return blocks
 
 
-def build_email_html(blocks: list) -> str:
+def build_email_html(blocks: list, subject: str | None = None) -> str:
     body = "\n".join(blocks)
+    title = _escape_html_text(subject) if subject else "Письмо"
     return (
         "<!DOCTYPE html>\n"
         '<html lang="ru">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
-        "<title>Письмо</title>\n"
+        f"<title>{title}</title>\n"
         '<style type="text/css">\n'
         "html { -webkit-text-size-adjust: none; -ms-text-size-adjust: none; }\n"
         "@media only screen and (max-width: 599px) {\n"
@@ -756,10 +757,13 @@ def run_selected(build_dir: Path, selection: dict) -> None:
         "content_blocks": [{"module", "element", "texts": [...], "images": [url, ...]}, ...],
         "schedule": bool,
         "footer": {"module", "element"},
+        "subject": str | None,
       }
     "images" — необязательный список реальных URL по позиции image-slot'а в
     компоненте; отсутствующий элемент списка (или весь ключ) -> информативный
     SVG-placeholder (см. _missing_image_placeholder_src()).
+    "subject" — тема письма, введённая пользователем; подставляется в <title> итогового
+    email.html (см. build_email_html()).
     """
     source_dir = build_dir / "source"
     try:
@@ -871,7 +875,7 @@ def run_selected(build_dir: Path, selection: dict) -> None:
             print(f"  - {exc}")
         sys.exit(1)
 
-    email_html = build_email_html(blocks)
+    email_html = build_email_html(blocks, subject=selection.get("subject"))
 
     generation_dir = build_dir / "generation"
     generation_dir.mkdir(parents=True, exist_ok=True)
