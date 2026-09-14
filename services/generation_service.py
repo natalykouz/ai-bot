@@ -218,6 +218,28 @@ async def run_qa_on_html(html_text: str) -> dict:
     return await asyncio.to_thread(_run)
 
 
+async def build_schedule_fish(build_id: str, element: str) -> Path:
+    """ЭТАП 3: «HTML-рыба рассылки» — только Schedule-блоки уже сформированного
+    расписания build'а (SCHEDULE.txt), обёрнутые в MGI_EDITOR_TEMPLATE.html.
+    Переиспользует generation.build_schedule_fish() (сам parsing/rendering
+    Schedule не дублируется, см. mail_project/generation.py)."""
+    await verify_build(build_id)
+    build_dir = build_dir_for(build_id)
+
+    def _run() -> Path:
+        try:
+            fish_html = generation.build_schedule_fish(build_dir, element)
+        except generation.GenerationError as exc:
+            raise GenerationServiceError(str(exc)) from exc
+        generation_dir = build_dir / "generation"
+        generation_dir.mkdir(parents=True, exist_ok=True)
+        out_path = generation_dir / "schedule_fish.html"
+        out_path.write_text(fish_html, encoding="utf-8")
+        return out_path
+
+    return await asyncio.to_thread(_run)
+
+
 def build_dir_for(build_id: str) -> Path:
     return BUILDS_DIR / build_id
 

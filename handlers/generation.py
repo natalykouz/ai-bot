@@ -58,6 +58,7 @@ class ScheduleGenStates(StatesGroup):
     waiting_xlsx = State()
     waiting_free_percent = State()
     reviewing_schedule = State()
+    choosing_fish_template = State()
 
 
 class LetterGenStates(StatesGroup):
@@ -254,11 +255,16 @@ async def _deliver_schedule_result(message: Message, state: FSMContext, build_id
     await state.set_state(ScheduleGenStates.reviewing_schedule)
     await message.answer(
         "Что дальше?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
-            [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
-        ]),
+        reply_markup=_reviewing_schedule_keyboard(),
     )
+
+
+def _reviewing_schedule_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
+        [InlineKeyboardButton(text="Создать HTML-рыбу рассылки", callback_data="schedgen:fish")],
+        [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
+    ])
 
 
 @router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:regen")
@@ -277,10 +283,7 @@ async def schedule_gen_regen(callback: CallbackQuery, state: FSMContext) -> None
     except gensvc.GenerationServiceError as exc:
         await callback.message.answer(
             f"Не удалось перегенерировать расписание:\n{exc}\n\nПредыдущий файл остаётся в силе.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
-                [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
-            ]),
+            reply_markup=_reviewing_schedule_keyboard(),
         )
         await callback.answer()
         return
@@ -293,6 +296,55 @@ async def schedule_gen_keep(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.clear()
     await callback.message.answer("Готово.", reply_markup=main_menu_keyboard)
+    await callback.answer()
+
+
+@router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:fish")
+async def schedule_gen_fish_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """ЭТАП 3: «Создать HTML-рыбу рассылки» — предлагает выбрать вид Schedule-компонента
+    (тот же выбор из manifest.json «Мероприятия»/«Расписание N», что и в Генерации письма,
+    см. _ask_schedule_template), затем собирает готовую рыбу поверх текущего SCHEDULE.txt."""
+    options = gensvc.schedule_template_options()
+    await state.update_data(_fish_template_list=options)
+    await state.set_state(ScheduleGenStates.choosing_fish_template)
+    buttons = [
+        InlineKeyboardButton(text=str(i + 1), callback_data=f"schedgen:fishtpl:{i}")
+        for i in range(len(options))
+    ]
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        "Выберите вид расписания:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(ScheduleGenStates.choosing_fish_template, F.data.startswith("schedgen:fishtpl:"))
+async def schedule_gen_fish_choose(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    element = data["_fish_template_list"][idx]
+    build_id = data["build_id"]
+
+    await callback.message.edit_text(f"Расписание: {element}")
+    await callback.message.answer("Собираю HTML-рыбу рассылки...")
+    try:
+        fish_path = await gensvc.build_schedule_fish(build_id, element)
+    except gensvc.GenerationServiceError as exc:
+        await callback.message.answer(
+            f"Не удалось собрать HTML-рыбу рассылки:\n{exc}",
+            reply_markup=_reviewing_schedule_keyboard(),
+        )
+        await state.set_state(ScheduleGenStates.reviewing_schedule)
+        await callback.answer()
+        return
+
+    await callback.message.answer_document(
+        BufferedInputFile(fish_path.read_bytes(), filename=fish_path.name),
+        caption=f"BUILD_ID: {build_id}. {element}.",
+    )
+    await state.set_state(ScheduleGenStates.reviewing_schedule)
+    await callback.message.answer("Что дальше?", reply_markup=_reviewing_schedule_keyboard())
     await callback.answer()
 
 

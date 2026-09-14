@@ -58,6 +58,11 @@ CARD_TEMPLATE = {"module": "Дополнительные Баннеры", "eleme
 SCHEDULE_TEMPLATE = {"module": "Мероприятия", "element": "Расписание 1"}
 SCHEDULE_MAX_EVENTS = 20
 
+# Проверенная оболочка «HTML-рыбы рассылки» (ЭТАП 3) — центрированный 660px
+# контейнер, живёт рядом с этим файлом, не входит в build_manager.sources.txt
+# (не часть canonical-библиотеки компонентов, читается напрямую как есть).
+MGI_EDITOR_TEMPLATE_PATH = Path(__file__).resolve().parent / "MGI_EDITOR_TEMPLATE.html"
+
 
 class GenerationError(Exception):
     """Недостающие данные или несоответствие библиотеке — блокирует выдачу HTML."""
@@ -563,6 +568,39 @@ def build_schedule_blocks(library: ComponentLibrary, groups: list, element: str 
                 html = _remove_hide_row(html, f"событие {slot_n}")
         blocks.append(html)
     return blocks
+
+
+def build_schedule_fish_html(blocks: list) -> str:
+    """Вставляет уже собранные Schedule-блоки (build_schedule_blocks) в проверенную
+    оболочку MGI_EDITOR_TEMPLATE.html — по одному <tr em="block"> на дату, без
+    единого изменения самой оболочки (ЭТАП 3). Точка вставки — единственный
+    пустой <tbody></tbody> оболочки; отдельный placeholder не понадобился."""
+    shell = MGI_EDITOR_TEMPLATE_PATH.read_text(encoding="utf-8")
+    marker = "<tbody>\n</tbody>"
+    if marker not in shell:
+        raise GenerationError("MGI_EDITOR_TEMPLATE.html: не найдена точка вставки <tbody></tbody>")
+    body = "\n".join(blocks)
+    return shell.replace(marker, f"<tbody>\n{body}\n</tbody>", 1)
+
+
+def build_schedule_fish(build_dir: Path, element: str) -> str:
+    """ЭТАП 3: HTML-рыба рассылки — только Schedule-блоки текущего расписания build'а
+    (по одному canonical-блоку на календарную дату), обёрнутые в MGI_EDITOR_TEMPLATE.html.
+    Переиспользует тот же источник истины, что и обычная сборка письма: SCHEDULE.txt
+    сгенерированного расписания через _parse_schedule_txt(), библиотеку компонентов
+    build'а и build_schedule_blocks() без изменений."""
+    schedule_path = build_dir / "schedule" / "SCHEDULE.txt"
+    if not schedule_path.is_file():
+        raise GenerationError("Schedule: SCHEDULE.txt отсутствует в сборке — сначала сгенерируйте расписание")
+
+    groups = _parse_schedule_txt(schedule_path)
+    if not groups:
+        raise GenerationError("Schedule: SCHEDULE.txt не содержит ни одного события")
+
+    source_dir = build_dir / "source"
+    library = ComponentLibrary(source_dir / "manifest.json", source_dir / "unisender_components.zip")
+    blocks = build_schedule_blocks(library, groups, element)
+    return build_schedule_fish_html(blocks)
 
 
 def build_email_html(blocks: list, subject: str | None = None) -> str:
