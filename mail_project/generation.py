@@ -580,19 +580,21 @@ def build_schedule_blocks(library: ComponentLibrary, groups: list, element: str 
 
 def build_schedule_fish_html(blocks: list, branch: str) -> str:
     """Вставляет уже собранные Schedule-блоки (build_schedule_blocks) в проверенную
-    оболочку EDITOR_TEMPLATE_PATHS[branch] — по одному <tr em="block"> на дату, без
-    единого изменения самой оболочки (ЭТАП 3). Точка вставки — единственный
-    пустой <tbody></tbody> оболочки; отдельный placeholder не понадобился."""
+    оболочку EDITOR_TEMPLATE_PATHS[branch] — по одному em-block на дату, без единого
+    изменения самой оболочки (ЭТАП 3). Точка вставки — перед закрывающим tbody
+    оболочки (единственный tbody в файле); блоки добавляются ПОСЛЕ того, что уже
+    есть внутри (например, шапка филиала, см. editor_templates/*.html) — оболочка
+    сейчас не обязана быть пустой."""
     shell_path = EDITOR_TEMPLATE_PATHS.get(branch)
     if shell_path is None:
         known = ", ".join(EDITOR_TEMPLATE_PATHS)
         raise GenerationError(f"HTML-основа письма: неизвестный филиал «{branch}». Ожидается одно из: {known}")
     shell = shell_path.read_text(encoding="utf-8")
-    marker = "<tbody>\n</tbody>"
+    marker = "</tbody>"
     if marker not in shell:
-        raise GenerationError(f"{shell_path.name}: не найдена точка вставки <tbody></tbody>")
+        raise GenerationError(f"{shell_path.name}: не найдена закрывающая tbody — точка вставки Schedule-блоков")
     body = "\n".join(blocks)
-    return shell.replace(marker, f"<tbody>\n{body}\n</tbody>", 1)
+    return shell.replace(marker, f"{body}\n{marker}", 1)
 
 
 def build_schedule_fish(build_dir: Path, element: str, branch: str) -> str:

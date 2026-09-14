@@ -89,6 +89,16 @@ class QAStates(StatesGroup):
     waiting_html = State()
 
 
+class ScheduleTxtFishStates(StatesGroup):
+    """Самостоятельный flow «HTML-основа письма из SCHEDULE.txt» — СММ присылает уже
+    готовый SCHEDULE.txt напрямую (без XLSX/Schedule processor, см. ScheduleGenStates),
+    build_id создаётся только чтобы получить доступ к canonical-библиотеке компонентов
+    (source/manifest.json + unisender_components.zip) для build_schedule_fish()."""
+    waiting_schedule_txt = State()
+    choosing_branch = State()
+    choosing_template = State()
+
+
 _VARIANT_RE = re.compile(r"^Вариант\s+(\d+)$")
 
 
@@ -122,15 +132,18 @@ def _find_line(output: str, prefix: str) -> str:
 
 @router.message(F.text == "Email-рассылки")
 async def btn_email_menu(message: Message, state: FSMContext) -> None:
-    """Открывает подменю с тремя независимыми операциями. Сами кнопки не выведены
-    в главное меню — только через этот пункт."""
+    """Открывает подменю с независимыми операциями. Сами кнопки не выведены
+    в главное меню — только через этот пункт.
+
+    «Генерация письма» и «Проверка качества письма» временно скрыты как
+    неактуальные (кнопки убраны из клавиатуры) — сам код флоу (LetterGenStates,
+    QAStates, все их хендлеры ниже) не удалён и не изменён."""
     await state.clear()
     await message.answer(
         "Email-рассылки. Выберите операцию:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Генерация расписания", callback_data="mail:schedule")],
-            [InlineKeyboardButton(text="Генерация письма", callback_data="mail:letter")],
-            [InlineKeyboardButton(text="Проверка качества письма", callback_data="mail:qa")],
+            [InlineKeyboardButton(text="HTML-основа письма из SCHEDULE.txt", callback_data="mail:schedule_txt_fish")],
         ]),
     )
 
@@ -386,6 +399,124 @@ async def schedule_gen_cancel(message: Message, state: FSMContext) -> None:
 @router.message(ScheduleGenStates.waiting_xlsx)
 async def schedule_gen_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю XLSX-файл документом. Или отправьте /cancel для отмены.")
+
+
+# =================================================================================
+# 1b. HTML-основа письма из готового SCHEDULE.txt: файл присылается напрямую,
+#     без XLSX/Schedule processor -> филиал -> вид расписания -> email_base.html.
+#     Переиспользует ту же gensvc.build_schedule_fish(), что и ScheduleGenStates —
+#     Schedule-парсинг/рендеринг не дублируется.
+# =================================================================================
+
+@router.callback_query(F.data == "mail:schedule_txt_fish")
+async def start_schedule_txt_fish(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ScheduleTxtFishStates.waiting_schedule_txt)
+    await callback.message.edit_text("HTML-основа письма из готового SCHEDULE.txt.")
+    await callback.message.answer(
+        "Пришлите файл SCHEDULE.txt документом.",
+        reply_markup=cancel_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleTxtFishStates.waiting_schedule_txt, F.document)
+async def schedule_txt_fish_receive(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or "SCHEDULE.txt"
+    if not file_name.lower().endswith(".txt"):
+        await message.answer("Нужен текстовый файл SCHEDULE.txt. Пришлите файл ещё раз.")
+        return
+
+    file = await message.bot.get_file(document.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    content = buf.read()
+
+    await message.answer("Создаю сборку...")
+    try:
+        build_id = await gensvc.create_build()
+        gensvc.save_schedule_file(build_id, content)
+    except gensvc.GenerationServiceError as exc:
+        await message.answer(f"Не удалось сохранить SCHEDULE.txt: {exc}\n\nПришлите файл ещё раз или отправьте /cancel.")
+        return
+
+    await state.update_data(build_id=build_id)
+    await _ask_schedule_txt_fish_branch(message, state)
+
+
+async def _ask_schedule_txt_fish_branch(message: Message, state: FSMContext) -> None:
+    options = gensvc.fish_branch_options()
+    await state.update_data(_branch_list=options)
+    await state.set_state(ScheduleTxtFishStates.choosing_branch)
+    buttons = [
+        InlineKeyboardButton(text=branch, callback_data=f"schedtxt:branch:{i}")
+        for i, branch in enumerate(options)
+    ]
+    await message.answer(
+        "Выберите филиал:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons]),
+    )
+
+
+@router.callback_query(ScheduleTxtFishStates.choosing_branch, F.data.startswith("schedtxt:branch:"))
+async def schedule_txt_fish_choose_branch(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    branch = data["_branch_list"][idx]
+    await state.update_data(branch=branch)
+
+    options = gensvc.schedule_template_options()
+    await state.update_data(_template_list=options)
+    await state.set_state(ScheduleTxtFishStates.choosing_template)
+    buttons = [
+        InlineKeyboardButton(text=str(i + 1), callback_data=f"schedtxt:tpl:{i}")
+        for i in range(len(options))
+    ]
+    await callback.message.edit_text(f"Филиал: {branch}")
+    await callback.message.answer(
+        "Выберите вид расписания:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(ScheduleTxtFishStates.choosing_template, F.data.startswith("schedtxt:tpl:"))
+async def schedule_txt_fish_choose_template(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    element = data["_template_list"][idx]
+    branch = data["branch"]
+    build_id = data["build_id"]
+
+    await callback.message.edit_text(f"Расписание: {element}")
+    await callback.message.answer("Собираю HTML-основу письма...")
+    try:
+        fish_path = await gensvc.build_schedule_fish(build_id, element, branch)
+    except gensvc.GenerationServiceError as exc:
+        await callback.message.answer(f"Не удалось собрать HTML-основу письма: {exc}")
+        await state.clear()
+        await callback.answer()
+        return
+
+    await callback.message.answer_document(
+        BufferedInputFile(fish_path.read_bytes(), filename=fish_path.name),
+        caption=f"BUILD_ID: {build_id}. {branch}. {element}.",
+    )
+    await state.clear()
+    await callback.message.answer("Готово.", reply_markup=main_menu_keyboard)
+    await callback.answer()
+
+
+@router.message(ScheduleTxtFishStates.waiting_schedule_txt, F.text == "Отмена")
+@router.message(ScheduleTxtFishStates.waiting_schedule_txt, Command("cancel"))
+async def schedule_txt_fish_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleTxtFishStates.waiting_schedule_txt)
+async def schedule_txt_fish_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
 
 
 # =================================================================================
