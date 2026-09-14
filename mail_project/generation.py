@@ -58,10 +58,18 @@ CARD_TEMPLATE = {"module": "Дополнительные Баннеры", "eleme
 SCHEDULE_TEMPLATE = {"module": "Мероприятия", "element": "Расписание 1"}
 SCHEDULE_MAX_EVENTS = 20
 
-# Проверенная оболочка «HTML-рыбы рассылки» (ЭТАП 3) — центрированный 660px
-# контейнер, живёт рядом с этим файлом, не входит в build_manager.sources.txt
-# (не часть canonical-библиотеки компонентов, читается напрямую как есть).
-MGI_EDITOR_TEMPLATE_PATH = Path(__file__).resolve().parent / "MGI_EDITOR_TEMPLATE.html"
+# Проверенные оболочки «HTML-основы письма» (ЭТАП 3) — центрированный 660px
+# контейнер, один файл на филиал (на основе MGI_EDITOR_TEMPLATE.html), чтобы
+# в дальнейшем их можно было независимо дорабатывать; сейчас идентичны.
+# Живут рядом с этим файлом, не входят в build_manager.sources.txt (не часть
+# canonical-библиотеки компонентов, читаются напрямую как есть). Шапки/подвалы
+# в них не входят — это отдельные UniSender-блоки библиотеки.
+EDITOR_TEMPLATE_DIR = Path(__file__).resolve().parent / "editor_templates"
+EDITOR_TEMPLATE_PATHS = {
+    "Москва": EDITOR_TEMPLATE_DIR / "Москва.html",
+    "Санкт-Петербург": EDITOR_TEMPLATE_DIR / "Санкт-Петербург.html",
+    "Казань": EDITOR_TEMPLATE_DIR / "Казань.html",
+}
 
 
 class GenerationError(Exception):
@@ -570,22 +578,29 @@ def build_schedule_blocks(library: ComponentLibrary, groups: list, element: str 
     return blocks
 
 
-def build_schedule_fish_html(blocks: list) -> str:
+def build_schedule_fish_html(blocks: list, branch: str) -> str:
     """Вставляет уже собранные Schedule-блоки (build_schedule_blocks) в проверенную
-    оболочку MGI_EDITOR_TEMPLATE.html — по одному <tr em="block"> на дату, без
+    оболочку EDITOR_TEMPLATE_PATHS[branch] — по одному <tr em="block"> на дату, без
     единого изменения самой оболочки (ЭТАП 3). Точка вставки — единственный
     пустой <tbody></tbody> оболочки; отдельный placeholder не понадобился."""
-    shell = MGI_EDITOR_TEMPLATE_PATH.read_text(encoding="utf-8")
+    shell_path = EDITOR_TEMPLATE_PATHS.get(branch)
+    if shell_path is None:
+        known = ", ".join(EDITOR_TEMPLATE_PATHS)
+        raise GenerationError(f"HTML-основа письма: неизвестный филиал «{branch}». Ожидается одно из: {known}")
+    shell = shell_path.read_text(encoding="utf-8")
     marker = "<tbody>\n</tbody>"
     if marker not in shell:
-        raise GenerationError("MGI_EDITOR_TEMPLATE.html: не найдена точка вставки <tbody></tbody>")
+        raise GenerationError(f"{shell_path.name}: не найдена точка вставки <tbody></tbody>")
     body = "\n".join(blocks)
     return shell.replace(marker, f"<tbody>\n{body}\n</tbody>", 1)
 
 
-def build_schedule_fish(build_dir: Path, element: str) -> str:
-    """ЭТАП 3: HTML-рыба рассылки — только Schedule-блоки текущего расписания build'а
-    (по одному canonical-блоку на календарную дату), обёрнутые в MGI_EDITOR_TEMPLATE.html.
+def build_schedule_fish(build_dir: Path, element: str, branch: str) -> str:
+    """ЭТАП 3: HTML-основа письма — только Schedule-блоки текущего расписания build'а
+    (по одному canonical-блоку на календарную дату), обёрнутые в Editor Template
+    выбранного филиала (EDITOR_TEMPLATE_PATHS). branch — филиал, для которого СММ
+    собирает письмо (выбирается явно в диалоге, не выводится из событий SCHEDULE.txt —
+    один build может содержать события нескольких филиалов, см. schedule_processor.py).
     Переиспользует тот же источник истины, что и обычная сборка письма: SCHEDULE.txt
     сгенерированного расписания через _parse_schedule_txt(), библиотеку компонентов
     build'а и build_schedule_blocks() без изменений."""
@@ -600,7 +615,7 @@ def build_schedule_fish(build_dir: Path, element: str) -> str:
     source_dir = build_dir / "source"
     library = ComponentLibrary(source_dir / "manifest.json", source_dir / "unisender_components.zip")
     blocks = build_schedule_blocks(library, groups, element)
-    return build_schedule_fish_html(blocks)
+    return build_schedule_fish_html(blocks, branch)
 
 
 def build_email_html(blocks: list, subject: str | None = None) -> str:

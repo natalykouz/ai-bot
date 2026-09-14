@@ -58,6 +58,7 @@ class ScheduleGenStates(StatesGroup):
     waiting_xlsx = State()
     waiting_free_percent = State()
     reviewing_schedule = State()
+    choosing_fish_branch = State()
     choosing_fish_template = State()
 
 
@@ -262,7 +263,7 @@ async def _deliver_schedule_result(message: Message, state: FSMContext, build_id
 def _reviewing_schedule_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Перегенерировать расписание", callback_data="schedgen:regen")],
-        [InlineKeyboardButton(text="Создать HTML-рыбу рассылки", callback_data="schedgen:fish")],
+        [InlineKeyboardButton(text="Создать HTML-основу письма", callback_data="schedgen:fish")],
         [InlineKeyboardButton(text="Оставить как есть", callback_data="schedgen:keep")],
     ])
 
@@ -301,9 +302,32 @@ async def schedule_gen_keep(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:fish")
 async def schedule_gen_fish_start(callback: CallbackQuery, state: FSMContext) -> None:
-    """ЭТАП 3: «Создать HTML-рыбу рассылки» — предлагает выбрать вид Schedule-компонента
-    (тот же выбор из manifest.json «Мероприятия»/«Расписание N», что и в Генерации письма,
-    см. _ask_schedule_template), затем собирает готовую рыбу поверх текущего SCHEDULE.txt."""
+    """ЭТАП 3: «Создать HTML-основу письма» — сначала спрашивает филиал (для выбора
+    Editor Template, см. generation.EDITOR_TEMPLATE_PATHS; в этом flow филиал никогда
+    не спрашивался и не выводится из событий SCHEDULE.txt — один build может содержать
+    события нескольких филиалов), затем вид Schedule-компонента (schedule_gen_fish_branch_choose)."""
+    options = gensvc.fish_branch_options()
+    await state.update_data(_fish_branch_list=options)
+    await state.set_state(ScheduleGenStates.choosing_fish_branch)
+    buttons = [
+        InlineKeyboardButton(text=branch, callback_data=f"schedgen:fishbranch:{i}")
+        for i, branch in enumerate(options)
+    ]
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        "Выберите филиал:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(ScheduleGenStates.choosing_fish_branch, F.data.startswith("schedgen:fishbranch:"))
+async def schedule_gen_fish_branch_choose(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    branch = data["_fish_branch_list"][idx]
+    await state.update_data(fish_branch=branch)
+
     options = gensvc.schedule_template_options()
     await state.update_data(_fish_template_list=options)
     await state.set_state(ScheduleGenStates.choosing_fish_template)
@@ -311,7 +335,7 @@ async def schedule_gen_fish_start(callback: CallbackQuery, state: FSMContext) ->
         InlineKeyboardButton(text=str(i + 1), callback_data=f"schedgen:fishtpl:{i}")
         for i in range(len(options))
     ]
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.edit_text(f"Филиал: {branch}")
     await callback.message.answer(
         "Выберите вид расписания:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
@@ -324,15 +348,16 @@ async def schedule_gen_fish_choose(callback: CallbackQuery, state: FSMContext) -
     data = await state.get_data()
     idx = int(callback.data.split(":")[-1])
     element = data["_fish_template_list"][idx]
+    branch = data["fish_branch"]
     build_id = data["build_id"]
 
     await callback.message.edit_text(f"Расписание: {element}")
-    await callback.message.answer("Собираю HTML-рыбу рассылки...")
+    await callback.message.answer("Собираю HTML-основу письма...")
     try:
-        fish_path = await gensvc.build_schedule_fish(build_id, element)
+        fish_path = await gensvc.build_schedule_fish(build_id, element, branch)
     except gensvc.GenerationServiceError as exc:
         await callback.message.answer(
-            f"Не удалось собрать HTML-рыбу рассылки:\n{exc}",
+            f"Не удалось собрать HTML-основу письма:\n{exc}",
             reply_markup=_reviewing_schedule_keyboard(),
         )
         await state.set_state(ScheduleGenStates.reviewing_schedule)
@@ -341,7 +366,7 @@ async def schedule_gen_fish_choose(callback: CallbackQuery, state: FSMContext) -
 
     await callback.message.answer_document(
         BufferedInputFile(fish_path.read_bytes(), filename=fish_path.name),
-        caption=f"BUILD_ID: {build_id}. {element}.",
+        caption=f"BUILD_ID: {build_id}. {branch}. {element}.",
     )
     await state.set_state(ScheduleGenStates.reviewing_schedule)
     await callback.message.answer("Что дальше?", reply_markup=_reviewing_schedule_keyboard())
