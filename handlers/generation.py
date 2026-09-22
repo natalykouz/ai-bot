@@ -495,7 +495,7 @@ async def letteros_migrate_receive_schedule_txt(message: Message, state: FSMCont
     try:
         result = await gensvc.migrate_letteros_email(build_id, letteros_html)
     except gensvc.GenerationServiceError as exc:
-        await message.answer(f"Не удалось мигрировать письмо:\n{exc}")
+        await message.answer(f"Не удалось мигрировать письмо:\n{html.escape(str(exc))}")
         await state.clear()
         await message.answer("Выберите действие:", reply_markup=main_menu_keyboard)
         return
