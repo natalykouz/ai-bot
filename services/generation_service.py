@@ -28,6 +28,7 @@ if str(MAIL_PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(MAIL_PROJECT_DIR))
 
 import generation  # noqa: E402  (mail_project/generation.py — существующий Generation engine)
+import letteros_migrate  # noqa: E402  (mail_project/letteros_migrate.py — существующий Letteros->UniSender migration engine)
 import qa  # noqa: E402  (mail_project/qa.py — существующий QA engine)
 
 UNISENDER_ZIP_PATH = MAIL_PROJECT_DIR / "unisender_components.zip"
@@ -274,6 +275,42 @@ def save_schedule_file(build_id: str, content: bytes) -> None:
     schedule_dir = build_dir / "schedule"
     schedule_dir.mkdir(parents=True, exist_ok=True)
     (schedule_dir / "SCHEDULE.txt").write_bytes(content)
+
+
+# --- Letteros -> UniSender migration (mail_project/letteros_migrate.py) --------
+
+async def migrate_letteros_email(
+    build_id: str,
+    letteros_html: str,
+    *,
+    schedule_element: str | None = None,
+    subject: str | None = None,
+) -> letteros_migrate.MigrationResult:
+    """Letteros HTML -> готовый UniSender HTML целиком, через существующий
+    letteros_migrate.migrate_letter() (recognition/adaptation/schedule-сборка не
+    дублируются). SCHEDULE.txt берётся из уже сохранённого build_dir/schedule/
+    (см. save_schedule_file()) — как и build_schedule_fish(), сам файл здесь не
+    создаётся и не парсится напрямую, только путь к нему передаётся дальше.
+    Canonical-библиотеки (Letteros/UniSender) явно не загружаются — используются
+    собственные defaults migrate_letter() (letteros_recognition.load_letteros_library()
+    и letteros_migrate._default_unisender_library(), тот же manifest.json/
+    unisender_components.zip проекта, что и у остальных операций)."""
+    await verify_build(build_id)
+    build_dir = build_dir_for(build_id)
+    schedule_txt_path = build_dir / "schedule" / "SCHEDULE.txt"
+
+    def _run() -> letteros_migrate.MigrationResult:
+        try:
+            return letteros_migrate.migrate_letter(
+                letteros_html,
+                schedule_txt_path,
+                schedule_element=schedule_element,
+                subject=subject,
+            )
+        except letteros_migrate.MigrationError as exc:
+            raise GenerationServiceError(str(exc)) from exc
+
+    return await asyncio.to_thread(_run)
 
 
 # --- Generation engine (mail_project/generation.py, импорт в процессе) ---------

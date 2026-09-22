@@ -89,6 +89,17 @@ class QAStates(StatesGroup):
     waiting_html = State()
 
 
+class LetterosMigrateStates(StatesGroup):
+    """Самостоятельный flow «Миграция письма Letteros -> UniSender» — HTML старого
+    письма и SCHEDULE.txt загружаются последовательно; build_id создаётся при
+    получении SCHEDULE.txt (только чтобы разместить файл через существующий
+    save_schedule_file(), см. ScheduleTxtFishStates). Сама миграция — существующий
+    gensvc.migrate_letteros_email() (mail_project/letteros_migrate.py), здесь не
+    дублируется."""
+    waiting_html = State()
+    waiting_schedule_txt = State()
+
+
 class ScheduleTxtFishStates(StatesGroup):
     """Самостоятельный flow «HTML-основа письма из SCHEDULE.txt» — СММ присылает уже
     готовый SCHEDULE.txt напрямую (без XLSX/Schedule processor, см. ScheduleGenStates),
@@ -144,6 +155,7 @@ async def btn_email_menu(message: Message, state: FSMContext) -> None:
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Генерация расписания", callback_data="mail:schedule")],
             [InlineKeyboardButton(text="HTML-основа письма из SCHEDULE.txt", callback_data="mail:schedule_txt_fish")],
+            [InlineKeyboardButton(text="Миграция письма Letteros → UniSender", callback_data="mail:letteros_migrate")],
         ]),
     )
 
@@ -399,6 +411,113 @@ async def schedule_gen_cancel(message: Message, state: FSMContext) -> None:
 @router.message(ScheduleGenStates.waiting_xlsx)
 async def schedule_gen_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю XLSX-файл документом. Или отправьте /cancel для отмены.")
+
+
+# =================================================================================
+# 1a. Миграция письма Letteros -> UniSender: старое HTML письмо + готовый
+#     SCHEDULE.txt -> gensvc.migrate_letteros_email() -> готовый UniSender HTML.
+#     build_id создаётся при получении SCHEDULE.txt (см. schedule_txt_fish_receive
+#     ниже — тот же паттерн: build нужен только для хранения SCHEDULE.txt).
+# =================================================================================
+
+@router.callback_query(F.data == "mail:letteros_migrate")
+async def start_letteros_migrate(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(LetterosMigrateStates.waiting_html)
+    await callback.message.edit_text("Миграция письма Letteros → UniSender.")
+    await callback.message.answer(
+        "Пришлите HTML-файл старого письма Letteros документом.",
+        reply_markup=cancel_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(LetterosMigrateStates.waiting_html, F.document)
+async def letteros_migrate_receive_html(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or "letteros.html"
+    if not file_name.lower().endswith((".html", ".htm")):
+        await message.answer("Нужен файл в формате .html. Пришлите файл ещё раз.")
+        return
+
+    file = await message.bot.get_file(document.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    html_text = buf.read().decode("utf-8", errors="replace")
+
+    if not html_text.strip():
+        await message.answer("Файл пустой. Пришлите файл ещё раз.")
+        return
+
+    await state.update_data(letteros_html=html_text)
+    await state.set_state(LetterosMigrateStates.waiting_schedule_txt)
+    await message.answer(
+        "HTML получен. Теперь пришлите файл SCHEDULE.txt документом.",
+        reply_markup=cancel_keyboard,
+    )
+
+
+@router.message(LetterosMigrateStates.waiting_html, F.text == "Отмена")
+@router.message(LetterosMigrateStates.waiting_html, Command("cancel"))
+async def letteros_migrate_cancel_html(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Миграция письма отменена.", reply_markup=main_menu_keyboard)
+
+
+@router.message(LetterosMigrateStates.waiting_html)
+async def letteros_migrate_wrong_html(message: Message) -> None:
+    await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterosMigrateStates.waiting_schedule_txt, F.document)
+async def letteros_migrate_receive_schedule_txt(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or "SCHEDULE.txt"
+    if not file_name.lower().endswith(".txt"):
+        await message.answer("Нужен текстовый файл SCHEDULE.txt. Пришлите файл ещё раз.")
+        return
+
+    file = await message.bot.get_file(document.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    content = buf.read()
+
+    data = await state.get_data()
+    letteros_html = data["letteros_html"]
+
+    await message.answer("Создаю сборку...")
+    try:
+        build_id = await gensvc.create_build()
+        gensvc.save_schedule_file(build_id, content)
+    except gensvc.GenerationServiceError as exc:
+        await message.answer(f"Не удалось сохранить SCHEDULE.txt: {exc}\n\nПришлите файл ещё раз или отправьте /cancel.")
+        return
+
+    await message.answer("Мигрирую письмо...")
+    try:
+        result = await gensvc.migrate_letteros_email(build_id, letteros_html)
+    except gensvc.GenerationServiceError as exc:
+        await message.answer(f"Не удалось мигрировать письмо:\n{exc}")
+        await state.clear()
+        await message.answer("Выберите действие:", reply_markup=main_menu_keyboard)
+        return
+
+    await message.answer_document(
+        BufferedInputFile(result.html.encode("utf-8"), filename=f"{build_id}.html"),
+        caption=f"BUILD_ID: {build_id}. Готово! Письмо мигрировано.",
+    )
+    await state.clear()
+    await message.answer("Выберите действие:", reply_markup=main_menu_keyboard)
+
+
+@router.message(LetterosMigrateStates.waiting_schedule_txt, F.text == "Отмена")
+@router.message(LetterosMigrateStates.waiting_schedule_txt, Command("cancel"))
+async def letteros_migrate_cancel_schedule_txt(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Миграция письма отменена.", reply_markup=main_menu_keyboard)
+
+
+@router.message(LetterosMigrateStates.waiting_schedule_txt)
+async def letteros_migrate_wrong_schedule_txt(message: Message) -> None:
+    await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
 
 
 # =================================================================================

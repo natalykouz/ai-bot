@@ -9,6 +9,13 @@
 - `1d9f1700-a3ac-46f4-8ad2-6bc580b54ca0.png`
   https://img.hiteml.com/en/v5/user-files?userId=7788090&resource=himg&disposition=inline&name=6z1s8k7x6xct7ab4a6h4mzmz4k4q8gk381pdsfs6dknisdammtx3ns5bi74xtk1u65mk6k15jufz9sqc8fabm9by44snz7g8qbxnh4onb46h895rgu5gms9fk41qgi9zy
 
+## Школа гида — логотип
+
+- `56f3c455-7668-4478-bc4f-0f5c46faa2bc.png` (белый логотип «ШКОЛА ГИДА», для тизал/тёмного фона — используется в Шапки/Школа 2, Шапки/Школа 3, Подвалы/Школа 1)
+  https://img.hiteml.com/en/v5/user-files?userId=7788090&resource=himg&disposition=inline&name=6xw4jy7foyag46b4a6h4mzmz4k4q8gk381pdsfs5dnyw8ut1tgz77wuutb66h6yih4i3xemsxnpxshqnwcm5sqqey51t7xr4crc4f3ia4nyaex5g7efqts4qwbbyk5us3
+
+Тёмной/цветной версии для белого фона пока нет — поэтому Шапки/Школа 1, Подвалы/Школа 2 и Подвалы/Школа 3 не тронуты, у них остался общий логотип МГИ.
+
 ## Расписание
 
 - `f7008a36-9043-4ae5-a770-c3018cdc38f9.png`
