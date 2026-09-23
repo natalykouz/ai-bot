@@ -563,13 +563,17 @@ class PositionRelativeNormalizationTests(unittest.TestCase):
 
 
 class RealProductionLettersTests(unittest.TestCase):
-    """4 реальных production Letteros-письма (mail_project/letteros htmls/),
-    добавленные как fixtures для этого этапа. Числа ниже — не целевые
-    показатели, а зафиксированный регрессионный результат текущего строгого
-    recognition + двух нормализаций (tbody, пустой class) на реальных данных:
-    честно невысокий (компоненты этих писем существенно отличаются от
-    библиотеки содержательно, не только по DOM-артефактам — см. диагностику),
-    но ни разу не бывший ошибочным (см. test_no_wrong_matches_on_real_letters)."""
+    """5 реальных production Letteros-писем (mail_project/letteros htmls/),
+    добавленные как fixtures для этого этапа (изначально 4, пятое —
+    "Рассылка 17.09.2026.html" — добавлено позже, при диагностике
+    FORM/CONTENT-архитектуры recognition, см. RECOGNITION_ARCHITECTURE_
+    AUDIT.md). Числа ниже — не целевые показатели, а зафиксированный
+    регрессионный результат текущего recognition (fingerprint/candidate index
+    + FormModel FORM/CONTENT/TOLERATED/OPTIONAL + двух нормализаций tbody/
+    пустой class) на реальных данных: честно невысокий (компоненты этих писем
+    существенно отличаются от библиотеки содержательно, не только по
+    DOM-артефактам — см. диагностику), но ни разу не бывший ошибочным (см.
+    test_no_wrong_matches_on_real_letters)."""
 
     @classmethod
     def setUpClass(cls):
@@ -581,8 +585,8 @@ class RealProductionLettersTests(unittest.TestCase):
             raise unittest.SkipTest(f"в {REAL_LETTERS_DIR} нет .html файлов")
         cls.results = {fp.name: lr.recognize_components(fp.read_text(encoding="utf-8"), cls.library) for fp in cls.files}
 
-    def test_four_fixtures_present(self):
-        self.assertEqual(len(self.files), 4)
+    def test_five_fixtures_present(self):
+        self.assertEqual(len(self.files), 5)
 
     def test_no_crash_and_at_least_one_candidate_per_letter(self):
         for name, result in self.results.items():
@@ -644,11 +648,19 @@ class RealProductionLettersTests(unittest.TestCase):
                     text = lr.extract_heading_text(m.html)
                     self.assertTrue(text, f"{name}: {m.module}/{m.element} — текст не извлечён")
                 else:
-                    ok, diffs = lr.structural_match(canon, m.html)
+                    # form_model этой же записи -- та же классификация,
+                    # которую recognize_components() уже использовала при
+                    # первом подтверждении (см. RECOGNITION_ARCHITECTURE_
+                    # AUDIT.md, шаг 1-2): без неё повторная проверка была бы
+                    # строже исходной (не учла бы CONTENT/TOLERATED-роли) и
+                    # ложно проваливала бы уже правильно подтверждённые
+                    # match'и (например, content-leaf с <strong> в тексте).
+                    form_model = self.library[(m.module, m.element)].form_model
+                    ok, diffs = lr.structural_match(canon, m.html, form_model=form_model)
                     self.assertTrue(ok, f"{name}: {m.module}/{m.element} числится подтверждённым, но повторная проверка не проходит: {diffs}")
 
     def test_confirmed_counts_regression_baseline(self):
-        # ВАЖНО: это regression baseline ТОЛЬКО для этих 4 конкретных real
+        # ВАЖНО: это regression baseline ТОЛЬКО для этих 5 конкретных real
         # fixtures ("letteros htmls/") — не production-правило. Эти числа
         # нигде не используются production-кодом (letteros_recognition.py/
         # letteros_adapt.py/letteros_migrate.py/generation.py) для принятия
@@ -657,21 +669,24 @@ class RealProductionLettersTests(unittest.TestCase):
         # динамически через структурное сравнение с library в момент вызова.
         # Значения ниже НЕ определяют допустимое/минимальное/максимальное
         # число блоков письма вообще — это просто "что фактически нашлось на
-        # этих 4 файлах сегодня".
+        # этих 5 файлах сегодня".
         #
-        # Зафиксировано на: tbody-нормализация + пустой class="" +
-        # module-level recognition для Шапки/Подвалы/Мероприятия +
-        # нормализация "position: relative" + классы 1-3 (wrapper_stripped/
-        # heading_text_injection/schedule module-level, см. диагностику
-        # к этому изменению). Менять эти числа можно только осознанно —
-        # вместе с изменением recognition/нормализации, и только проверив
-        # ПРИЧИНУ изменения (новая корректная нормализация — ок; случайное
-        # ослабление строгости сравнения — нет).
+        # Зафиксировано на: FORM/CONTENT/TOLERATED/OPTIONAL FormModel + единый
+        # generic candidate index (build_candidate_index()/find_candidates(),
+        # см. RECOGNITION_ARCHITECTURE_AUDIT.md) + tbody-нормализация + пустой
+        # class="" + module-level recognition для Шапки/Подвалы/Мероприятия +
+        # нормализация "position: relative" + классы 1-4 (wrapper_stripped/
+        # heading_text_injection/grid_content_injection/schedule module-level).
+        # Менять эти числа можно только осознанно — вместе с изменением
+        # recognition/нормализации, и только проверив ПРИЧИНУ изменения
+        # (новая корректная нормализация — ок; случайное ослабление строгости
+        # сравнения — нет).
         expected_confirmed = {
             "ГИ special рассылка 21.04.2026.html": 27,
             "Казань Рассылка 30.07.2026.html": 13,
             "Копия — Мск 27.11.2025 рассылка.html": 16,
-            "Франшиза — экскурсия.html": 8,
+            "Рассылка 17.09.2026.html": 17,
+            "Франшиза — экскурсия.html": 12,
         }
         actual = {name: len(result.matches) for name, result in self.results.items()}
         self.assertEqual(actual, expected_confirmed)

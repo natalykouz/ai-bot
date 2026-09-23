@@ -114,23 +114,40 @@ def _transplant_image_slot(uni_inner_html: str, production_html: str) -> str:
     return new_html
 
 
-def _rebuild_wrapper_stripped(unisender_html: str, production_fragment: str) -> str:
+def _rebuild_via_wrapper_split(unisender_html: str, build_inner) -> str:
+    """Общий шаг сборки для ЛЮБОГО match_mode, где canonical UniSender-
+    компонент имеет форму "card-обвязка + ровно одна внутренняя <tr>" (см.
+    letteros_recognition.split_wrapper_stripped()): card-обвязка (prefix/
+    suffix) ВСЕГДА берётся из canonical UniSender-компонента как есть --
+    это FORM, letteros-фрагмент её не трогает; build_inner(uni_inner) решает,
+    каким CONTENT наполнить единственную вариативную часть (внутреннюю <tr>).
+
+    Раньше эта же самая последовательность (split_wrapper_stripped ->
+    подставить новое содержимое инстанс -> prefix + new_inner + suffix) была
+    продублирована по отдельности в _rebuild_wrapper_stripped() и
+    _rebuild_heading_text_injection() -- теперь один общий шаг, две функции
+    ниже отличаются только тем, ЧТО именно они кладут в build_inner."""
     split = letteros_recognition.split_wrapper_stripped(unisender_html)
     if split is None:
         raise ValueError(
             "canonical UniSender-компонент не имеет ожидаемой формы "
-            "card-обвязки для wrapper_stripped адаптации"
+            "card-обвязки для CONTENT injection"
         )
     prefix, uni_inner, suffix = split
-    if letteros_recognition._is_single_image_slot_shape(uni_inner):
-        new_inner = _transplant_image_slot(uni_inner, production_fragment)
-    else:
+    return prefix + build_inner(uni_inner) + suffix
+
+
+def _rebuild_wrapper_stripped(unisender_html: str, production_fragment: str) -> str:
+    def build_inner(uni_inner: str) -> str:
+        if letteros_recognition._is_single_image_slot_shape(uni_inner):
+            return _transplant_image_slot(uni_inner, production_fragment)
         # не image-slot (например, кнопка) — текст/href уже "переменные"
         # каналы (см. letteros_recognition._VARIABLE_ATTRS), поэтому
         # production-версия внутренней <tr> переносится как есть; tracking
         # href из неё снимет adapt_wrapper() ниже, как и для обычных блоков.
-        new_inner = production_fragment
-    return prefix + new_inner + suffix
+        return production_fragment
+
+    return _rebuild_via_wrapper_split(unisender_html, build_inner)
 
 
 # --- класс 3: content-aware перенос текста заголовков -----------------------
@@ -139,21 +156,17 @@ _TD_INNER_CONTENT_RE = re.compile(r"(<td\b[^>]*>)(.*)(</td>)", re.DOTALL)
 
 
 def _rebuild_heading_text_injection(unisender_html: str, extracted_text: str) -> str:
-    split = letteros_recognition.split_wrapper_stripped(unisender_html)
-    if split is None:
-        raise ValueError(
-            "canonical UniSender-компонент не имеет ожидаемой формы для "
-            "heading_text_injection"
-        )
-    prefix, uni_inner, suffix = split
-    m = _TD_INNER_CONTENT_RE.search(uni_inner)
-    if m is None:
-        raise ValueError("не найден <td>...</td> внутри canonical UniSender-заголовка")
-    # extracted_text — уже сырой срез исходного HTML-текста (см.
-    # letteros_recognition.extract_text()), с валидными entity вроде &nbsp; —
-    # вставляется как есть, повторное HTML-экранирование испортило бы их.
-    new_inner = uni_inner[:m.start(2)] + extracted_text + uni_inner[m.end(2):]
-    return prefix + new_inner + suffix
+    def build_inner(uni_inner: str) -> str:
+        m = _TD_INNER_CONTENT_RE.search(uni_inner)
+        if m is None:
+            raise ValueError("не найден <td>...</td> внутри canonical UniSender-заголовка")
+        # extracted_text — уже сырой срез исходного HTML-текста (см.
+        # letteros_recognition.extract_text()), с валидными entity вроде
+        # &nbsp; — вставляется как есть, повторное HTML-экранирование
+        # испортило бы их.
+        return uni_inner[:m.start(2)] + extracted_text + uni_inner[m.end(2):]
+
+    return _rebuild_via_wrapper_split(unisender_html, build_inner)
 
 
 # --- класс 4: 2-колоночный grid "Контентные блоки/Вариант 2-4" -------------
@@ -345,6 +358,7 @@ def adapt_component(
     module: str, element: str | None, letteros_html: str,
     *, match_mode: str = "full", unisender_html: str | None = None,
     extracted_text: str | None = None, unisender_library=None,
+    letteros_canonical_html: str | None = None, form_model=None,
 ) -> AdaptedComponent:
     """Точка входа для вызывающего кода: адаптирует оболочку через
     adapt_wrapper() и явно сообщает статус — можно ли доверять результату как
@@ -356,7 +370,22 @@ def adapt_component(
 
     match_mode (см. letteros_recognition.RecognizedComponent.match_mode):
       - "full" (по умолчанию) — letteros_html используется как есть, только
-        оболочка адаптируется adapt_wrapper() (прежнее, неизменное поведение);
+        оболочка адаптируется adapt_wrapper() (прежнее, неизменное поведение).
+        Единый механизм CONTENT injection для этого случая: если переданы
+        letteros_canonical_html и form_model (canonical Letteros-html этого
+        компонента и его LetterosEntry.form_model, см. letteros_recognition.py)
+        — ПЕРЕД adapt_wrapper() production-содержимое CONTENT-узлов (по той же
+        FormModel-классификации, что уже подтвердила FORM на шаге recognition,
+        см. letteros_recognition.strip_content_leaf_formatting()) заменяется
+        извлечённым из production же ЧИСТЫМ ТЕКСТОМ — убирается только ручное
+        inline-форматирование (<strong>/<span>/...), остальной production HTML
+        (картинки, ссылки, прочие атрибуты — они и так уже CONTENT корректно
+        расположенный в самом production, letteros_html здесь и есть база,
+        а не canonical-скелет) не меняется. Если CONTENT-позиция содержит
+        что-то, что нельзя безопасно прочитать как текст (img/table/a и т.п.)
+        — результат REQUIRES_MANUAL_REVIEW, а не угаданная/частичная
+        подстановка. Без этих двух аргументов (по умолчанию) поведение "full"
+        не отличается от прежнего;
       - "wrapper_stripped" — вокруг letteros_html (внутренняя <tr> без
         внешней card-обвязки) СОБИРАЕТСЯ полный canonical-блок на основе
         unisender_html (обязателен); картинки идут через существующий
@@ -398,6 +427,21 @@ def adapt_component(
             raise ValueError("match_mode='grid_content_injection' требует unisender_library")
         html = adapt_wrapper(_rebuild_grid_content_injection(unisender_library, letteros_html))
     else:
+        if form_model is not None and letteros_canonical_html is not None:
+            stripped = letteros_recognition.strip_content_leaf_formatting(
+                letteros_canonical_html, letteros_html, form_model,
+            )
+            if stripped is None:
+                note = (
+                    "CONTENT-узел(ы) canonical-компонента (по FormModel, см. FORM-шаг "
+                    "recognition) в production содержат что-то за пределами "
+                    "простого текста и разрешённых inline-обёрток форматирования "
+                    "(strong/b/span/em/i/u/br) -- автоматическая CONTENT-подстановка "
+                    "не выполняется, требуется ручная проверка"
+                )
+                html = adapt_wrapper(letteros_html)
+                return AdaptedComponent(module, element, html, AdaptationStatus.REQUIRES_MANUAL_REVIEW, note)
+            letteros_html = stripped
         html = adapt_wrapper(letteros_html)
 
     if element is None:

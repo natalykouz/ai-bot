@@ -328,6 +328,7 @@ class WrapperStrippedImageMigrationTests(unittest.TestCase):
             "ГИ special рассылка 21.04.2026.html": 1,
             "Казань Рассылка 30.07.2026.html": 1,
             "Копия — Мск 27.11.2025 рассылка.html": 1,
+            "Рассылка 17.09.2026.html": 1,
             "Франшиза — экскурсия.html": 3,
         }
         for fp in sorted(REAL_LETTERS_DIR.glob("*.html")):

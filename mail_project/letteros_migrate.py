@@ -162,7 +162,9 @@ def _split_schedule_and_determine_insertion(matches: list) -> tuple[list, int]:
     return non_schedule, footer_index
 
 
-def _adapt_all(non_schedule_matches: list, unisender_library: generation.ComponentLibrary) -> list:
+def _adapt_all(
+    non_schedule_matches: list, letteros_library: dict, unisender_library: generation.ComponentLibrary,
+) -> list:
     adapted_html = []
     for m in non_schedule_matches:
         kwargs = {}
@@ -184,6 +186,19 @@ def _adapt_all(non_schedule_matches: list, unisender_library: generation.Compone
             kwargs["extracted_text"] = text
         if m.match_mode == "grid_content_injection":
             kwargs["unisender_library"] = unisender_library
+        if m.match_mode == "full" and m.element is not None:
+            # Единый CONTENT injection для обычных (не wrapper_stripped/
+            # heading/grid) компонентов -- letteros_recognition.py, FormModel
+            # (см. RECOGNITION_ARCHITECTURE_AUDIT.md, шаг 3): тот же общий
+            # механизм для ЛЮБОГО компонента с CONTENT-узлами, не отдельный
+            # match_mode. Без записи в letteros_library (не должно происходить
+            # -- m уже распознан по этой же библиотеке) или без FormModel --
+            # kwargs остаются пустыми, adapt_component() ведёт себя как раньше
+            # (letteros_html как есть).
+            entry = letteros_library.get((m.module, m.element))
+            if entry is not None and entry.form_model is not None:
+                kwargs["letteros_canonical_html"] = entry.html
+                kwargs["form_model"] = entry.form_model
 
         adapted = letteros_adapt.adapt_component(m.module, m.element, m.html, match_mode=m.match_mode, **kwargs)
         if adapted.status == letteros_adapt.AdaptationStatus.REQUIRES_MANUAL_REVIEW:
@@ -248,7 +263,7 @@ def migrate_letter(
     _check_no_gaps(letteros_html, result.matches)
 
     non_schedule, insertion_index = _split_schedule_and_determine_insertion(result.matches)
-    adapted_blocks = _adapt_all(non_schedule, unisender_library)
+    adapted_blocks = _adapt_all(non_schedule, letteros_library, unisender_library)
     schedule_blocks = _build_schedule_blocks(schedule_txt_path, unisender_library, schedule_element)
 
     final_blocks = adapted_blocks[:insertion_index] + schedule_blocks + adapted_blocks[insertion_index:]

@@ -40,6 +40,7 @@ None, исходный HTML-фрагмент сохраняется как ес�
 """
 
 import difflib
+import itertools
 import re
 import zipfile
 from pathlib import Path
@@ -220,9 +221,15 @@ class RecognitionResult:
 
 
 class LetterosEntry:
-    __slots__ = ("module", "element", "html", "root", "fingerprint", "stripped_html", "stripped_fingerprint")
+    __slots__ = (
+        "module", "element", "html", "root", "fingerprint", "stripped_html", "stripped_fingerprint",
+        "form_model",
+    )
 
-    def __init__(self, module, element, html, root, fingerprint, stripped_html=None, stripped_fingerprint=None):
+    def __init__(
+        self, module, element, html, root, fingerprint, stripped_html=None, stripped_fingerprint=None,
+        form_model=None,
+    ):
         self.module = module
         self.element = element
         self.html = html
@@ -232,6 +239,18 @@ class LetterosEntry:
         # имеет фигуры "card-обвязка + MSO + ровно одна внутренняя <tr>".
         self.stripped_html = stripped_html
         self.stripped_fingerprint = stripped_fingerprint
+        # см. build_form_model() -- единая FORM/CONTENT/TOLERATED/OPTIONAL
+        # классификация всего дерева этого компонента (RECOGNITION_ARCHITECTURE_
+        # AUDIT.md): читается candidate index'ом (build_candidate_index()),
+        # structural_match()/_nodes_match() и адаптацией (letteros_adapt.py,
+        # strip_content_leaf_formatting()) -- основной, реально используемый
+        # путь для "полных" (match_mode="full") совпадений и их обвязки.
+        # Раньше здесь отдельно хранился ещё content_leaf_spans (только
+        # CONTENT-часть той же классификации) -- убран, полностью поглощён
+        # form_model (ничто в recognition/adaptation больше не читало
+        # content_leaf_spans отдельно от него, см. RECOGNITION_ARCHITECTURE_
+        # AUDIT.md, шаг 4).
+        self.form_model = form_model
 
 
 # --- нормализация значений для сравнения -----------------------------------
@@ -261,12 +280,34 @@ def _parse_style(style: str) -> dict:
     return props
 
 
-def _style_equal(a: str, b: str, extra_variable_style_props: frozenset = frozenset()) -> bool:
+def _style_equal(
+    a: str, b: str, extra_variable_style_props: frozenset = frozenset(),
+    node_style_roles: dict | None = None,
+) -> bool:
+    """node_style_roles -- {css-свойство: FormRole} ИМЕННО этого canonical-
+    узла (см. FormModel/NodeClassification.style_roles ниже в файле):
+    свойства с ролью CONTENT/TOLERATED снимаются с обеих сторон так же, как и
+    _VARIABLE_STYLE_PROPS/extra_variable_style_props -- единый путь для
+    padding внешней card-обвязки "Текстовые блоки/Текст NNpx" (TOLERATED,
+    см. build_form_model()) в дополнение к уже глобальным content-каналам."""
     pa, pb = _parse_style(a), _parse_style(b)
     for prop in _VARIABLE_STYLE_PROPS | extra_variable_style_props:
         pa.pop(prop, None)
         pb.pop(prop, None)
-    # "position: relative" — см. _LETTEROS_NOISE_POSITION_VALUE. Снимается
+    if node_style_roles:
+        for prop, role in node_style_roles.items():
+            if role in (FormRole.CONTENT, FormRole.TOLERATED):
+                pa.pop(prop, None)
+                pb.pop(prop, None)
+    # "position: relative" — см. _LETTEROS_NOISE_POSITION_VALUE. НЕ выражено
+    # через FormModel/node_style_roles выше: FormModel сегодня классифицирует
+    # только CSS-свойства, которые canonical-узел САМ объявляет в своём style
+    # (см. _classify_node()), а этот случай — ровно противоположный (canonical
+    # НЕ объявляет "position" ни у одного из 121 компонентов ни в одной из
+    # двух библиотек, см. диагностику) — представить это как "роль узла"
+    # некорректно без изменения самой структуры FormModel (вне рамок этого
+    # шага, см. RECOGNITION_ARCHITECTURE_AUDIT.md). Сохранён как есть —
+    # единственный оставшийся здесь механизм старого образца. Снимается
     # только когда canonical (a) вообще не задаёт position И инстанс (b)
     # задаёт его РОВНО как "relative" — ни на йоту шире:
     #   - canonical без position + инстанс без position -> уже равны, эта
@@ -287,7 +328,15 @@ def _attr_value_equal(
     tag: str, name: str, canon_val: str, inst_val: str,
     extra_variable_attrs: frozenset = frozenset(),
     extra_variable_style_props: frozenset = frozenset(),
+    node_attr_roles: dict | None = None,
+    node_style_roles: dict | None = None,
 ) -> bool:
+    """node_attr_roles/node_style_roles -- роли атрибутов/CSS-свойств ИМЕННО
+    этого canonical-узла из FormModel (см. NodeClassification ниже в файле).
+    None по умолчанию -- поведение не меняется для вызовов без FormModel
+    (см. _resolve_wrapper_stripped_match(), которая сравнивает entry.
+    stripped_html -- для него FormModel пока не строится, другое пространство
+    смещений, см. build_form_model())."""
     # Атрибут без "=значение" (например, валидный в HTML `nowrap` без
     # значения) парсится qa._parse_attrs() как value=None, а не "" — приводим
     # к строке до сравнения, это не нормализация содержимого, а просто защита
@@ -296,8 +345,10 @@ def _attr_value_equal(
     inst_val = inst_val or ""
     if (tag, name) in _VARIABLE_ATTRS or (tag, name) in extra_variable_attrs:
         return True
+    if node_attr_roles and node_attr_roles.get(name) in (FormRole.CONTENT, FormRole.TOLERATED):
+        return True
     if name == "style":
-        return _style_equal(canon_val, inst_val, extra_variable_style_props)
+        return _style_equal(canon_val, inst_val, extra_variable_style_props, node_style_roles)
     if name == "bgcolor":
         return _normalize_color_token(canon_val.strip().lower()) == _normalize_color_token(inst_val.strip().lower())
     return canon_val.strip() == inst_val.strip()
@@ -367,6 +418,7 @@ def _nodes_match(
     cn: Node, ct: str, inn: Node, it: str, diffs: list, path: str,
     extra_variable_attrs: frozenset = frozenset(),
     extra_variable_style_props: frozenset = frozenset(),
+    form_model: "FormModel | None" = None,
 ) -> bool:
     if cn.tag != inn.tag:
         diffs.append(f"{path}: <{cn.tag}> ожидался, найден <{inn.tag}>")
@@ -396,6 +448,12 @@ def _nodes_match(
     # letteros-element/module/hide/no-utm) — без этого такие валидные
     # совпадения ложно считались бы различием только по имени атрибута.
     inst_attrs = {n: v for n, v in inn.attrs if n not in _ATTRS_ABSENT_ON_INSTANCE}
+    # Роли атрибутов/CSS-свойств ИМЕННО этого canonical-узла (FormModel, см.
+    # ниже в файле) -- None, если form_model не передан вызывающим кодом
+    # (см. docstring structural_match()) или если для cn нет классификации.
+    classification = form_model.get(cn) if form_model is not None else None
+    node_attr_roles = classification.attr_roles if classification is not None else None
+    node_style_roles = classification.style_roles if classification is not None else None
     if "class" not in canon_attrs and inst_attrs.get("class") == "":
         # В canonical-библиотеке (обе версии, letteros_components.zip и
         # unisender_components.zip) class встречается только со значениями
@@ -434,9 +492,19 @@ def _nodes_match(
     for name, cval in canon_attrs.items():
         if not _attr_value_equal(
             cn.tag, name, cval, inst_attrs[name], extra_variable_attrs, extra_variable_style_props,
+            node_attr_roles, node_style_roles,
         ):
             diffs.append(f"{path}<{cn.tag} {name}>: {cval!r} != {inst_attrs[name]!r}")
             return False
+
+    if classification is not None and classification.whole_role == FormRole.CONTENT:
+        # FORM этого узла (tag + обязательные атрибуты) уже подтверждена выше.
+        # canonical сам объявляет эту позицию текстовой (единственный ребёнок --
+        # #text) -- дети инстанса (чистый текст, <strong>/<span> и т.п.) это
+        # CONTENT, не FORM, дальше по дереву не сравниваются вовсе. Раньше --
+        # прямая проверка (cn.start, cn.end) in content_leaf_spans; теперь то
+        # же самое, но через FormModel (см. build_form_model()).
+        return True
 
     ok = True
     for kind, c_range, i_range in _align(cn.children, inn.children):
@@ -444,13 +512,25 @@ def _nodes_match(
             for ci, ii in zip(c_range, i_range):
                 if not _nodes_match(
                     cn.children[ci], ct, inn.children[ii], it, diffs, f"{path}>{cn.tag}",
-                    extra_variable_attrs, extra_variable_style_props,
+                    extra_variable_attrs, extra_variable_style_props, form_model,
                 ):
                     ok = False
         elif kind == "delete":
             for ci in c_range:
                 node = cn.children[ci]
-                if not _is_hide_optional(node):
+                # OPTIONAL -- через FormModel, если она известна и содержит
+                # классификацию этого узла; иначе (form_model не передан,
+                # или это узел стороны, для которой FormModel не строится --
+                # см. docstring structural_match()) -- прежняя прямая проверка
+                # letteros-hide, ровно тот же факт, что уже использует и сама
+                # FormModel (см. _classify_node()).
+                node_classification = form_model.get(node) if form_model is not None else None
+                optional = (
+                    node_classification.whole_role == FormRole.OPTIONAL
+                    if node_classification is not None
+                    else _is_hide_optional(node)
+                )
+                if not optional:
                     diffs.append(f"{path}>{cn.tag}: отсутствует обязательный узел canonical-компонента")
                     ok = False
         elif kind in ("insert", "mismatch"):
@@ -463,6 +543,7 @@ def structural_match(
     canon_html: str, inst_html: str,
     extra_variable_attrs: frozenset = frozenset(),
     extra_variable_style_props: frozenset = frozenset(),
+    form_model: "FormModel | None" = None,
 ) -> tuple[bool, list]:
     """Публичная точка входа для сравнения одного фрагмента с одним canonical
     Letteros-компонентом. Возвращает (совпадает, список_причин_несовпадения).
@@ -472,16 +553,31 @@ def structural_match(
     class="" там, где canonical-компонент вообще не задаёт class; при
     сравнении CSS в style снимается добавленный инстансом "position:
     relative" там, где canonical вообще не задаёт position (см.
-    _style_equal/_LETTEROS_NOISE_POSITION_VALUE) — три единственные на сегодня
-    глобально применённые нормализации. Остальные наблюдавшиеся на реальных
-    письмах отличия сознательно НЕ нормализуются глобально — см. диагностику.
+    _style_equal/_LETTEROS_NOISE_POSITION_VALUE) — единственная оставшаяся
+    здесь нормализация старого образца, НЕ выражённая через FormModel (см.
+    комментарий внутри _style_equal() -- почему). Остальные наблюдавшиеся на
+    реальных письмах отличия сознательно НЕ нормализуются глобально -- см.
+    диагностику.
 
     extra_variable_attrs/extra_variable_style_props — точечное, по умолчанию
     пустое расширение "переменных" каналов (как _VARIABLE_ATTRS/
     _VARIABLE_STYLE_PROPS выше, но не глобальное): используется только вызовом
-    из recognize_components() для уже подтверждённого узкого случая
-    (image-slot компонентов при wrapper-stripped распознавании, см.
-    _IMAGE_SLOT_EXTRA_VARIABLE_*) — не меняет поведение при вызове без них."""
+    из _resolve_wrapper_stripped_match() для уже подтверждённого узкого
+    случая (image-slot компонентов при wrapper-stripped распознавании, см.
+    _IMAGE_SLOT_EXTRA_VARIABLE_*) — не меняет поведение при вызове без них.
+    Этот путь пока НЕ подключён к FormModel (см. ниже) -- он сравнивает
+    entry.stripped_html, а не entry.html, то есть другое пространство
+    смещений, для которого FormModel сегодня не строится.
+
+    form_model — LetterosEntry.form_model этого же canonical-компонента (см.
+    build_form_model() ниже в файле): единая FORM/CONTENT/TOLERATED/OPTIONAL
+    классификация его дерева -- заменяет собой то, что раньше передавалось
+    отдельно как content_leaf_spans (CONTENT для content-leaf узлов), и
+    дополнительно учитывает per-узловые TOLERATED-исключения (сегодня одно —
+    padding внешней card-обвязки "Текстовые блоки/Текст NNpx", см.
+    build_form_model()). По умолчанию None (поведение не меняется, если не
+    передано — используется вызовами, для которых FormModel ещё не построена,
+    см. extra_variable_attrs выше)."""
     diffs: list = []
     inst_html = _strip_implicit_tbody(inst_html)
     try:
@@ -491,7 +587,7 @@ def structural_match(
         return False, [f"не удалось разобрать фрагмент как единый HTML-элемент: {exc}"]
     ok = _nodes_match(
         canon_root, canon_html, inst_root, inst_html, diffs, "",
-        extra_variable_attrs, extra_variable_style_props,
+        extra_variable_attrs, extra_variable_style_props, form_model,
     )
     return ok, diffs
 
@@ -504,6 +600,105 @@ def _wrapper_td(root: Node):
         return None
     return elements[0]
 
+
+# --- FORM/CONTENT: "content-leaf" узлы (canonical-узел, чей единственный
+# ребёнок -- #text) -- определение перенесено в _classify_node()/
+# build_form_model() (см. ниже в файле, секция FormModel): там же, где и
+# остальная FORM/CONTENT/TOLERATED/OPTIONAL классификация узла, а не отдельной
+# функцией/полем. Раньше здесь была отдельная _find_content_leaf_spans() и
+# LetterosEntry.content_leaf_spans — обе убраны (RECOGNITION_ARCHITECTURE_
+# AUDIT.md, шаг 4): recognition/adaptation больше нигде их не читали, вся
+# работа уже шла через LetterosEntry.form_model.
+
+
+# --- CONTENT extraction/injection для content-leaf узлов --------------------
+#
+# Второй технический шаг архитектуры FORM -> CONTENT: если canonical-узел на
+# CONTENT-позиции (по FormModel) уже структурно подтверждён (structural_match()
+# с тем же form_model вернул True), его production-содержимое можно
+# безопасно прочитать как ЧИСТЫЙ ТЕКСТ (extract_text()) и подставить назад в
+# production-фрагмент ВМЕСТО оригинального поддерева -- убирая ручное inline-
+# форматирование (<strong>/<span>/...), не трогая остальной HTML (картинки,
+# ссылки, прочие атрибуты остаются производственными, как и раньше в match_
+# mode="full").
+#
+# Разрешённый "безопасный" контент -- явный, небольшой enum inline-тегов
+# форматирования (по аналогии с _VARIABLE_ATTRS/LETTEROS_EDITOR_ONLY_ATTRS
+# выше -- ничего не разрешается без явного перечисления). Если внутри
+# content-leaf позиции встречается что-то за пределами этого списка (img/
+# table/a/td и т.п.) -- это НЕ считается текстом, ничего не угадывается и не
+# извлекается частично (см. strip_content_leaf_formatting()).
+_CONTENT_LEAF_INLINE_TAGS = {"strong", "b", "span", "em", "i", "u", "br"}
+
+
+def _is_safe_content_subtree(node: Node) -> bool:
+    for child in node.children:
+        if child.tag == "#text":
+            continue
+        if child.tag not in _CONTENT_LEAF_INLINE_TAGS:
+            return False
+        if not _is_safe_content_subtree(child):
+            return False
+    return True
+
+
+def strip_content_leaf_formatting(canon_html: str, inst_html: str, form_model: "FormModel") -> str | None:
+    """Параллельный обход canon_html/inst_html (тот же принцип выравнивания
+    детей, что и в _nodes_match/_align -- предполагается, что structural_match
+    с ЭТИМ ЖЕ form_model уже вернул True для этой пары): на каждой
+    CONTENT-позиции canonical (form_model.get(cn).whole_role == FormRole.
+    CONTENT -- то же самое, что раньше проверялось через content_leaf_spans
+    напрямую, теперь единообразно с _nodes_match) заменяет содержимое
+    соответствующего узла production на извлечённый чистый текст
+    (extract_text(), без <strong>/<span>/... -- см. _is_safe_content_subtree());
+    всё остальное в inst_html (картинки, ссылки, прочие узлы/атрибуты)
+    остаётся без изменений.
+
+    Возвращает None, если хотя бы одна CONTENT-позиция содержит в production
+    что-то за пределами простого текста и разрешённых inline-обёрток (img/
+    table/a/... ) -- ничего не подставляется частично, вызывающий код должен
+    считать компонент не готовым к автоматической CONTENT-инъекции.
+
+    Как и structural_match(), для выравнивания разбирает inst_html после
+    снятия неявного <tbody> (_strip_implicit_tbody) -- явные <tbody>, если они
+    были в production, в результате не сохраняются; это инертный для
+    HTML-писем артефакт (см. _strip_implicit_tbody docstring), а не
+    содержательное изменение."""
+    working_html = _strip_implicit_tbody(inst_html)
+    try:
+        canon_root = parse_root(canon_html)
+        inst_root = parse_root(working_html)
+    except QABlocked:
+        return None
+
+    replacements: list[tuple[int, int, str]] = []
+
+    def visit(cn: Node, inn: Node) -> bool:
+        if cn.tag in ("#text", "#comment"):
+            return True
+        classification = form_model.get(cn)
+        if classification is not None and classification.whole_role == FormRole.CONTENT:
+            if not inn.children:
+                return True  # пусто с обеих сторон -- заменять нечего
+            if not _is_safe_content_subtree(inn):
+                return False
+            text = extract_text(inn, working_html).strip()
+            replacements.append((inn.children[0].start, inn.children[-1].end, text))
+            return True
+        for kind, c_range, i_range in _align(cn.children, inn.children):
+            if kind != "equal":
+                continue  # структура уже подтверждена structural_match() ранее
+            for ci, ii in zip(c_range, i_range):
+                if not visit(cn.children[ci], inn.children[ii]):
+                    return False
+        return True
+
+    if not visit(canon_root, inst_root):
+        return None
+
+    for start, end, text in sorted(replacements, key=lambda r: r[0], reverse=True):
+        working_html = working_html[:start] + text + working_html[end:]
+    return working_html
 
 
 # --- "production-вариант без внешней card-обвязки" (класс 1) ---------------
@@ -1049,17 +1244,356 @@ def load_letteros_library(zip_path: Path = LETTEROS_COMPONENTS_ZIP) -> dict:
                     stripped_fingerprint = _fingerprint_from_td_attrs(dict(stripped_td.attrs))
                 else:
                     stripped_html = None
+            form_model = build_form_model(module, element, root, html)
             entries[(module, element)] = LetterosEntry(
                 module, element, html, root, fingerprint, stripped_html, stripped_fingerprint,
+                form_model,
             )
     return entries
 
 
-def _build_fingerprint_index(library: dict) -> dict:
+# Семейство "Текстовые блоки/Текст NNpx" -- используется build_form_model()
+# ниже, чтобы объявить padding внешней card-обвязки этих компонентов TOLERATED
+# (см. диагностику: 31 реальный gap на 5 production-письмах, align/bgcolor/
+# border-radius этой же обвязки ни разу не отличались от canonical). Больше
+# нигде не используется -- сама вариативность padding теперь целиком данные
+# FormModel, а не отдельный индекс/resolver (см. build_candidate_index() ниже
+# в файле).
+_TEXT_NNPX_ELEMENT_RE = re.compile(r"^Текст \d+px$")
+
+
+# =============================================================================
+# FORM/CONTENT/TOLERATED/OPTIONAL -- единая canonical-side классификация
+# (RECOGNITION_ARCHITECTURE_AUDIT.md, "ПЛАН РЕАЛИЗАЦИИ", шаг 1 из 5).
+#
+# ЭТО ТОЛЬКО ОПИСАНИЕ ФОРМЫ canonical-компонента, вычисляемое исключительно из
+# canonical HTML при загрузке библиотеки -- ничего из production здесь не
+# участвует. Ни один из существующих механизмов (fingerprint-индексы,
+# structural_match/_nodes_match, content_leaf_spans, _VARIABLE_ATTRS/
+# _VARIABLE_STYLE_PROPS, letteros-hide, image-slot, text-padding resolver и
+# т.д.) эту классификацию пока не читает и не меняет своего поведения --
+# они остаются единственным реально работающим путём recognition/adaptation.
+# Задача этого шага -- только свести уже ДОКАЗАННЫЕ правила в одну структуру
+# данных рядом со старыми механизмами, для последующей (отдельной) замены
+# индексации/structural_match/adapt на неё.
+#
+# Роль назначается на двух уровнях:
+#   - whole_role узла целиком -- OPTIONAL (узел может отсутствовать целиком,
+#     как и сегодня определяет letteros-hide/_is_hide_optional), CONTENT
+#     (узел -- content-leaf, всё, что ниже, уже не FORM, как и сегодня
+#     определяет content_leaf_spans), иначе FORM (узел и его дети по
+#     умолчанию участвуют в идентификации формы);
+#   - attr_roles/style_roles -- роль ОТДЕЛЬНЫХ атрибутов/CSS-свойств этого
+#     узла (используется только когда whole_role == FORM -- у CONTENT/
+#     OPTIONAL узлов сами атрибуты уже не имеют значения для формы):
+#       CONTENT    -- глобально известные переменные каналы (соответствуют
+#                     _VARIABLE_ATTRS/_VARIABLE_STYLE_PROPS/VML-комментарию);
+#       TOLERATED  -- ТОЛЬКО два уже доказанных диагностикой случая (не
+#                     расширять без отдельного доказательства на реальных
+#                     письмах, см. RECOGNITION_ARCHITECTURE_AUDIT.md):
+#                       - style-свойство "position" (см.
+#                         _LETTEROS_NOISE_POSITION_VALUE -- сама
+#                         классификация не учитывает конкретное значение
+#                         "relative", это по-прежнему делает _style_equal());
+#                       - style-свойство "padding" ИМЕННО на внешней
+#                         card-обвязке компонентов "Текстовые блоки/Текст
+#                         NNpx" (накладывается ниже, в build_form_model());
+#       FORM       -- всё остальное, включая padding/bgcolor/border-radius
+#                     ВЛОЖЕННЫХ "плашек"/highlight-box у "Авторы"/
+#                     "Мероприятия"/"Контентные блоки" -- там эти же самые
+#                     имена атрибутов/свойств реально различают разные
+#                     canonical-элементы (см. диагностику) и НЕ становятся
+#                     TOLERATED/CONTENT только потому, что где-то в другом
+#                     компоненте таким стал одноимённый признак.
+# =============================================================================
+
+class FormRole:
+    """Роль canonical-узла/атрибута/CSS-свойства в модели. Простые строки-
+    константы, не отдельный enum-класс -- по тому же принципу, что и
+    letteros_adapt.AdaptationStatus."""
+    FORM = "FORM"
+    CONTENT = "CONTENT"
+    TOLERATED = "TOLERATED"
+    OPTIONAL = "OPTIONAL"
+
+
+class NodeClassification:
+    """Роль ОДНОГО canonical-узла. span -- (start, end) в html этой записи
+    (тот же формат смещений, что и content_leaf_spans/RecognizedComponent),
+    поэтому напрямую сопоставим с offsets, которые уже использует
+    _nodes_match() для сравнения того же узла."""
+    __slots__ = ("span", "tag", "whole_role", "attr_roles", "style_roles")
+
+    def __init__(self, span: tuple, tag: str, whole_role: str, attr_roles: dict, style_roles: dict):
+        self.span = span
+        self.tag = tag
+        self.whole_role = whole_role
+        self.attr_roles = attr_roles    # {имя_атрибута: FormRole}
+        self.style_roles = style_roles  # {css_свойство: FormRole}
+
+    def __repr__(self):
+        return f"NodeClassification(<{self.tag}> {self.span}, whole={self.whole_role})"
+
+
+class FormModel:
+    """Полная классификация одного canonical-компонента -- по одному
+    NodeClassification на каждый обычный HTML-узел его дерева (см.
+    build_form_model()). Хранится как LetterosEntry.form_model."""
+    __slots__ = ("by_span",)
+
+    def __init__(self, by_span: dict):
+        self.by_span = by_span  # (start, end) -> NodeClassification
+
+    def get(self, node: Node) -> "NodeClassification | None":
+        return self.by_span.get((node.start, node.end))
+
+    def __repr__(self):
+        return f"FormModel({len(self.by_span)} узлов)"
+
+
+# Глобальные (не зависящие от конкретного canonical-компонента) CONTENT-роли
+# -- переиспользуют уже доказанные и работающие множества, не дублируют их
+# литералами.
+_CONTENT_ATTR_ROLES = {key: FormRole.CONTENT for key in _VARIABLE_ATTRS}
+_CONTENT_STYLE_PROP_ROLES = {prop: FormRole.CONTENT for prop in _VARIABLE_STYLE_PROPS}
+
+# Единственные два доказанных TOLERATED-случая (см. заголовок секции выше) --
+# "position" применяется глобально (роль не зависит от компонента, как и
+# сегодняшний _LETTEROS_NOISE_POSITION_VALUE), "padding" внешней обвязки --
+# только для семейства "Текстовые блоки/Текст NNpx" (см. диагностику,
+# RECOGNITION_ARCHITECTURE_AUDIT.md).
+_GLOBAL_TOLERATED_STYLE_PROPS = frozenset({"position"})
+_TOLERATED_OUTER_PADDING_MODULE = "Текстовые блоки"
+_TOLERATED_OUTER_PADDING_ELEMENT_RE = _TEXT_NNPX_ELEMENT_RE
+
+
+def _classify_node(node: Node) -> NodeClassification | None:
+    """whole_role/attr_roles/style_roles ровно одного узла -- без учёта
+    module/element-специфичных TOLERATED-переопределений (их накладывает
+    build_form_model() после первого прохода, точечно). None для #text/
+    #comment -- у #text роли нет (её текст либо внутри content-leaf узла,
+    либо не структура вовсе, см. _nodes_match()); #comment классифицируется
+    отдельно build_form_model() (VML-маркер -- тоже CONTENT, тот же принцип,
+    что и в _nodes_match())."""
+    if node.tag in ("#text", "#comment"):
+        return None
+
+    hide_value = next((v for n, v in node.attrs if n == "letteros-hide"), None)
+    if hide_value is not None:
+        whole_role = FormRole.OPTIONAL
+    elif len(node.children) == 1 and node.children[0].tag == "#text":
+        whole_role = FormRole.CONTENT
+    else:
+        whole_role = FormRole.FORM
+
+    attr_roles: dict = {}
+    style_roles: dict = {}
+    for name, value in node.attrs:
+        if name in _ATTRS_ABSENT_ON_INSTANCE:
+            continue  # editor-only -- не переживает экспорт, роли не нужно
+        attr_roles[name] = _CONTENT_ATTR_ROLES.get((node.tag, name), FormRole.FORM)
+        if name == "style":
+            for prop in _parse_style(value):
+                if prop in _CONTENT_STYLE_PROP_ROLES:
+                    style_roles[prop] = FormRole.CONTENT
+                elif prop in _GLOBAL_TOLERATED_STYLE_PROPS:
+                    style_roles[prop] = FormRole.TOLERATED
+                else:
+                    style_roles[prop] = FormRole.FORM
+
+    return NodeClassification((node.start, node.end), node.tag, whole_role, attr_roles, style_roles)
+
+
+def build_form_model(module: str, element: str, root: Node, html: str) -> FormModel:
+    """Строит FormModel для одного canonical-компонента (Letteros ИЛИ
+    UniSender -- функция не зависит от того, какая это библиотека, только от
+    самого дерева и его исходного html). Обходит дерево целиком, классифицируя
+    каждый узел через _classify_node(); затем накладывает единственное сегодня
+    доказанное per-компонент TOLERATED-переопределение (padding внешней
+    card-обвязки "Текстовые блоки/Текст NNpx" -- см. заголовок секции)."""
+    by_span: dict = {}
+
+    def visit(node: Node) -> None:
+        if node.tag == "#comment":
+            comment_text = html[node.start:node.end]
+            role = FormRole.CONTENT if _VML_IMAGE_COMMENT_RE.search(comment_text) else FormRole.FORM
+            # VML-комментарий -- редкость на этом уровне обхода (обычно
+            # встречается внутри MSO-условного блока картинки); большинство
+            # #comment узлов остаются FORM (сравниваются as-is, см.
+            # _normalize_comment_whitespace() в _nodes_match()).
+            by_span[(node.start, node.end)] = NodeClassification(
+                (node.start, node.end), node.tag, role, {}, {},
+            )
+        else:
+            c = _classify_node(node)
+            if c is not None:
+                by_span[c.span] = c
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+
+    if module == _TOLERATED_OUTER_PADDING_MODULE and _TOLERATED_OUTER_PADDING_ELEMENT_RE.match(element or ""):
+        wrapper = _wrapper_td(root)
+        if wrapper is not None:
+            classification = by_span.get((wrapper.start, wrapper.end))
+            if classification is not None and "padding" in classification.style_roles:
+                classification.style_roles["padding"] = FormRole.TOLERATED
+
+    return FormModel(by_span)
+
+
+# =============================================================================
+# Единый generic candidate index (RECOGNITION_ARCHITECTURE_AUDIT.md, "ПЛАН
+# РЕАЛИЗАЦИИ", шаг 2 из 5) -- заменяет собой прежние ДВА отдельных индекса
+# ("полный" fingerprint и отдельный "text-padding-agnostic" -- см. предыдущую
+# версию этого файла): один и тот же принцип для ЛЮБОГО canonical-компонента,
+# а не два отдельных, написанных вручную под конкретный случай.
+#
+# Ключ -- тот же 5-tuple, что и раньше вычисляла _fingerprint_from_td_attrs()
+# (align/bgcolor/bgcolor-style/padding/border-radius внешнего <td>), но
+# позиции, чья роль у ЭТОГО КОНКРЕТНОГО компонента (по его FormModel, см.
+# build_form_model() выше) -- CONTENT или TOLERATED, заменяются на общий
+# wildcard-сентинел. Само решение "эта позиция не участвует в идентификации
+# формы" целиком приходит из FormModel (данные), а не из кода этой функции
+# (код один и тот же для padding-у-"Текст-NNpx" и для любого другого будущего
+# TOLERATED-случая, который появится в build_form_model() -- новый код индекса
+# добавлять не потребуется). Для подавляющего большинства компонентов
+# (без TOLERATED-позиций у обвязки) это ровно тот же ключ, что раньше строил
+# fingerprint-индекс.
+# =============================================================================
+
+# Позиции 5-tuple fingerprint (см. _fingerprint_from_td_attrs()) -> откуда
+# брать роль этой позиции у КОНКРЕТНОГО компонента: ("attr", имя) — из
+# NodeClassification.attr_roles внешнего <td>; ("style", свойство) — из
+# NodeClassification.style_roles.
+_FINGERPRINT_POSITION_SOURCES = (
+    ("attr", "align"),
+    ("attr", "bgcolor"),
+    ("style", "background-color"),
+    ("style", "padding"),
+    ("style", "border-radius"),
+)
+
+# Сентинел "эта позиция ключа — wildcard" (позиция CONTENT/TOLERATED у этого
+# компонента, значение не участвует в поиске кандидатов). Отдельный object(),
+# не None/"" -- эти значения уже легитимно встречаются как настоящие значения
+# полей fingerprint (например, пустой bgcolor-style).
+_WILDCARD = object()
+
+
+def _wrapper_classification(entry: LetterosEntry) -> "NodeClassification | None":
+    if entry.form_model is None:
+        return None
+    wrapper = _wrapper_td(entry.root)
+    if wrapper is None:
+        return None
+    return entry.form_model.get(wrapper)
+
+
+def _tolerated_fingerprint_positions(classification: "NodeClassification | None") -> frozenset:
+    """Индексы (0..4) позиций 5-tuple, чья роль у ЭТОГО componента --
+    CONTENT или TOLERATED (см. _FINGERPRINT_POSITION_SOURCES) -- то есть не
+    должна участвовать в ключе кандидатного индекса. Пусто, если
+    классификация неизвестна (нет FormModel) или ни одна позиция не
+    объявлена вариативной -- тогда ключ этого компонента совпадает с его
+    обычным entry.fingerprint целиком, как и раньше."""
+    if classification is None:
+        return frozenset()
+    positions = set()
+    for i, (kind, name) in enumerate(_FINGERPRINT_POSITION_SOURCES):
+        roles = classification.attr_roles if kind == "attr" else classification.style_roles
+        if roles.get(name) in (FormRole.CONTENT, FormRole.TOLERATED):
+            positions.add(i)
+    return frozenset(positions)
+
+
+def _project_fingerprint(key: tuple, wildcard_positions: frozenset) -> tuple:
+    return tuple(_WILDCARD if i in wildcard_positions else v for i, v in enumerate(key))
+
+
+def build_candidate_index(library: dict) -> tuple[dict, list]:
+    """Единый generic candidate index. Возвращает (index, wildcard_patterns):
+
+    index -- {проекция 5-tuple: [(module, element), ...]}. Каждый компонент
+    регистрируется под ВСЕМИ проекциями своего ключа -- под точным
+    entry.fingerprint И под каждой проекцией с любым непустым подмножеством
+    его собственных tolerated-позиций, замененных на wildcard (полный набор
+    подмножеств; на практике сегодня либо 0, либо 1 tolerated-позиция на
+    компонент -- "Текстовые блоки/Текст NNpx" -- значит не более 2 записей на
+    компонент, без комбинаторного взрыва).
+
+    wildcard_patterns -- отсортированный список всех НЕПУСТЫХ множеств
+    позиций, реально встретившихся хотя бы у одного компонента библиотеки --
+    нужен production-стороне (см. find_candidates()), чтобы знать, какие
+    проекции своего собственного (всегда точного, "полного") ключа вообще
+    имеет смысл пробовать. Это данные, извлечённые из библиотеки, а не
+    захардкоженный список атрибутов."""
     index: dict = {}
+    wildcard_patterns: set = set()
     for key, entry in library.items():
-        index.setdefault(entry.fingerprint, []).append(key)
-    return index
+        classification = _wrapper_classification(entry)
+        tolerated = _tolerated_fingerprint_positions(classification)
+        for r in range(len(tolerated) + 1):
+            for subset in itertools.combinations(sorted(tolerated), r):
+                subset = frozenset(subset)
+                projected = _project_fingerprint(entry.fingerprint, subset)
+                index.setdefault(projected, []).append(key)
+                if subset:
+                    wildcard_patterns.add(subset)
+    return index, sorted(wildcard_patterns, key=lambda s: (len(s), sorted(s)))
+
+
+def find_candidates(fragment_attrs: dict, index: dict, wildcard_patterns: list) -> list:
+    """production-сторона единого candidate index. fragment_attrs -- атрибуты
+    внешнего <td> production-фрагмента (как их уже строит recognize_components()).
+
+    Сначала пробует точный fingerprint фрагмента. Если он даёт хотя бы одного
+    кандидата — используется только он (как и раньше делал обычный fingerprint-
+    индекс: точное совпадение всей обвязки достаточно специфично само по себе,
+    расширять его дополнительными TOLERATED-проекциями не нужно и рискованно —
+    см. ниже). Только если точный ключ не даёт НИ ОДНОГО кандидата, пробуется,
+    по очереди, КАЖДАЯ проекция, реально встретившаяся хотя бы у одного
+    canonical-компонента библиотеки (wildcard_patterns, см.
+    build_candidate_index()) — так же, как раньше text-padding-agnostic резолвер
+    вызывался ТОЛЬКО когда обычный fingerprint был пуст, а не всегда.
+
+    Это принципиально: TOLERATED-позиция (например, padding у "Текст NNpx")
+    — это возможность подтвердить компонент по остальной, строгой части
+    обвязки, когда ТОЧНОГО совпадения нет вовсе, а НЕ дополнительный, всегда
+    примешиваемый источник кандидатов — иначе для очень широкого класса
+    production-фрагментов (общего вида align/bgcolor/border-radius, но с
+    padding, никак не связанным с текстовыми блоками) "Текст 14/16px"
+    попадали бы в кандидаты без всякой причины, раздувая unresolved вместо
+    того, чтобы фрагмент оставался молча непройденным gap'ом, как раньше.
+
+    Это только prefilter — не решает, какой компонент это на самом деле;
+    окончательное решение по-прежнему принимает structural_match(...,
+    form_model=entry.form_model) в recognize_components().
+
+    Возвращает (candidates, is_exact). is_exact=False (кандидаты найдены
+    только через wildcard-проекцию) — сигнал вызывающему коду, что
+    ПОДПИСЬ обёртки совпала не по-настоящему, а только "с точностью до
+    TOLERATED-отличия" (см. выше): этого достаточно для попытки confirm через
+    structural_match(form_model=...), но НЕДОСТАТОЧНО, чтобы включать классы
+    1-4 (wrapper_stripped/heading/grid/schedule module-level) — они рассчитаны
+    на действительно точное совпадение обвязки, а TOLERATED-проекция может
+    случайно совпасть по align/bgcolor/border-radius с СОВЕРШЕННО другой,
+    структурно не связанной обвязкой (например, у другого "сгруппированного"
+    card-варианта с иным padding) — включение классов 1-4 в этом случае
+    рискует найти вложенный фрагмент ДРУГОГО компонента на неверной внешней
+    границе (см. диагностику регрессии на реальном letteros-фиксте)."""
+    exact_key = _fingerprint_from_td_attrs(fragment_attrs)
+    exact_candidates = index.get(exact_key) or []
+    if exact_candidates:
+        return list(exact_candidates), True
+
+    candidates: list = []
+    for pattern in wildcard_patterns:
+        for candidate in index.get(_project_fingerprint(exact_key, pattern)) or []:
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates, False
 
 
 def _build_stripped_fingerprint_index(library: dict) -> dict:
@@ -1120,7 +1654,7 @@ def recognize_components(html_text: str, library: dict | None = None) -> Recogni
     """
     if library is None:
         library = load_letteros_library()
-    index = _build_fingerprint_index(library)
+    candidate_index, wildcard_patterns = build_candidate_index(library)
     stripped_index = _build_stripped_fingerprint_index(library)
     heading_font_sizes = _build_heading_font_sizes(library)
     schedule_header_signatures = _build_schedule_header_signatures(library)
@@ -1139,19 +1673,21 @@ def recognize_components(html_text: str, library: dict | None = None) -> Recogni
             pos = m.end()
             continue
 
-        fingerprint = _fingerprint_from_td_attrs(dict(_parse_attrs(td_m.group(0)[len("<td"):-1])))
-        candidate_keys = index.get(fingerprint) or []
+        fragment_attrs = dict(_parse_attrs(td_m.group(0)[len("<td"):-1]))
+        candidate_keys, candidates_are_exact = find_candidates(fragment_attrs, candidate_index, wildcard_patterns)
         if not candidate_keys:
             # Классы 1-3 ниже (stripped-index/заголовки/расписание) сознательно
-            # НЕ пытаются сработать здесь: без совпадения по первичному
-            # fingerprint'у (обвязка целиком) слишком высок риск найти
-            # структурно похожий, но не тот, ВЛОЖЕННЫЙ фрагмент ДРУГОГО
-            # canonical-компонента (подтверждено на "Контентные блоки/Место" --
-            # её собственная внутренняя строка-заголовок структурно совпадает
-            # с "Заголовок 28px" без обвязки, но это не одно и то же). Во всех
-            # реальных STOP-кейсах (кнопка/картинка/событие/заголовки, см.
-            # диагностику) первичный fingerprint уже был непустым -- это
-            # ограничение их не затрагивает.
+            # НЕ пытаются сработать здесь: без совпадения по кандидатному
+            # индексу (обвязка целиком, с учётом TOLERATED/CONTENT-позиций
+            # каждого компонента из его FormModel -- см. build_candidate_index())
+            # слишком высок риск найти структурно похожий, но не тот, ВЛОЖЕННЫЙ
+            # фрагмент ДРУГОГО canonical-компонента (подтверждено на
+            # "Контентные блоки/Место" -- её собственная внутренняя строка-
+            # заголовок структурно совпадает с "Заголовок 28px" без обвязки, но
+            # это не одно и то же). Во всех реальных STOP-кейсах (кнопка/
+            # картинка/событие/заголовки/padding "Текст NNpx", см. диагностику)
+            # кандидатный индекс уже был непустым -- это ограничение их не
+            # затрагивает.
             pos = m.end()
             continue
 
@@ -1162,7 +1698,7 @@ def recognize_components(html_text: str, library: dict | None = None) -> Recogni
         all_diffs = {}
         for key in candidate_keys:
             entry = library[key]
-            ok, diffs = structural_match(entry.html, fragment)
+            ok, diffs = structural_match(entry.html, fragment, form_model=entry.form_model)
             if ok:
                 confirmed.append(key)
             else:
@@ -1180,90 +1716,105 @@ def recognize_components(html_text: str, library: dict | None = None) -> Recogni
             pos = end  # компоненты не вкладываются друг в друга — пропускаем всё содержимое
             continue
 
-        candidate_modules = {m_ for m_, _e in candidate_keys}
-        if len(candidate_modules) == 1:
-            only_module = next(iter(candidate_modules))
-            if only_module in MODULE_LEVEL_ELIGIBLE_MODULES:
-                basis = (
-                    f"подпись обёртки совпала с {len(candidate_keys)} кандидат(ом/ами) из "
-                    f"letteros_components, все из модуля {only_module}; структурная проверка "
-                    f"подтвердила {len(confirmed)} из {len(candidate_keys)} (не ровно один), но "
-                    f"эта подпись не пересекается ни с одним другим модулем библиотеки (см. "
-                    f"MODULE_LEVEL_ELIGIBLE_MODULES) — распознано как module-level компонент, "
-                    f"element осознанно не выбран"
-                )
-                matches.append(RecognizedComponent(only_module, None, order, start, end, fragment, basis))
-                order += 1
-                pos = end
-                continue
+        # Классы module-level/1/3/4/2 ниже требуют candidates_are_exact: они
+        # рассчитаны на ДЕЙСТВИТЕЛЬНО точное совпадение подписи обвязки, а не
+        # на "совпадает с точностью до TOLERATED-отличия" (см. find_candidates()).
+        # TOLERATED-проекция (сегодня — padding у "Текст NNpx") может случайно
+        # совпасть по align/bgcolor/border-radius с СОВЕРШЕННО другой,
+        # структурно не связанной обвязкой (например, другим "сгруппированным"
+        # card-вариантом с иным padding) — попытка классов 1/3/4/2 в этом
+        # случае рискует найти вложенный фрагмент ДРУГОГО компонента на
+        # неверной внешней границе (найдено регрессионным тестом на реальном
+        # letteros-фикстуре: без этого ограничения class 1 "проваливался"
+        # внутрь чужой card-обвязки, случайно похожей по этим трём признакам).
+        # Обычный confirm-цикл через structural_match() выше по-прежнему
+        # работает для НЕ-exact кандидатов — только эти дополнительные классы
+        # его не подхватывают.
+        if candidates_are_exact:
+            candidate_modules = {m_ for m_, _e in candidate_keys}
+            if len(candidate_modules) == 1:
+                only_module = next(iter(candidate_modules))
+                if only_module in MODULE_LEVEL_ELIGIBLE_MODULES:
+                    basis = (
+                        f"подпись обёртки совпала с {len(candidate_keys)} кандидат(ом/ами) из "
+                        f"letteros_components, все из модуля {only_module}; структурная проверка "
+                        f"подтвердила {len(confirmed)} из {len(candidate_keys)} (не ровно один), но "
+                        f"эта подпись не пересекается ни с одним другим модулем библиотеки (см. "
+                        f"MODULE_LEVEL_ELIGIBLE_MODULES) — распознано как module-level компонент, "
+                        f"element осознанно не выбран"
+                    )
+                    matches.append(RecognizedComponent(only_module, None, order, start, end, fragment, basis))
+                    order += 1
+                    pos = end
+                    continue
 
-        # --- класс 1: production-вариант без внешней card-обвязки ----------
-        resolved = _resolve_wrapper_stripped_match(fragment, stripped_index, library)
-        if resolved is not None:
-            module, element, matched_html = resolved
-            basis = (
-                f"внешняя card-обвязка/MSO ghost-table у canonical-компонента {module}/{element} "
-                f"в production отсутствует (известный технический паттерн экспорта Letteros); "
-                f"внутренняя <tr> структурно подтверждена без обвязки"
-            )
-            matches.append(RecognizedComponent(
-                module, element, order, start, end, matched_html, basis, match_mode="wrapper_stripped",
-            ))
-            order += 1
-            pos = end
-            continue
-
-        # --- класс 3: заголовки "Текстовые блоки/Заголовок NNpx" -----------
-        if candidate_keys and heading_font_sizes:
-            heading_match = _try_heading_text_injection(fragment, heading_font_sizes)
-            if heading_match is not None:
-                module, element, _text = heading_match
+            # --- класс 1: production-вариант без внешней card-обвязки ------
+            resolved = _resolve_wrapper_stripped_match(fragment, stripped_index, library)
+            if resolved is not None:
+                module, element, matched_html = resolved
                 basis = (
-                    f"font-size внутреннего <td> однозначно совпал с canonical {module}/{element}; "
-                    f"остальное оформление (align/class/line-height/<strong> вместо font-weight) — "
-                    f"production-drift, не переносится — переносится только извлечённый текст"
+                    f"внешняя card-обвязка/MSO ghost-table у canonical-компонента {module}/{element} "
+                    f"в production отсутствует (известный технический паттерн экспорта Letteros); "
+                    f"внутренняя <tr> структурно подтверждена без обвязки"
                 )
                 matches.append(RecognizedComponent(
-                    module, element, order, start, end, fragment, basis, match_mode="heading_text_injection",
+                    module, element, order, start, end, matched_html, basis, match_mode="wrapper_stripped",
                 ))
                 order += 1
                 pos = end
                 continue
 
-        # --- класс 4: 2-колоночный grid "Контентные блоки/Вариант 2-4" -----
-        if candidate_keys and any(k[0] == GRID_MODULE_NAME for k in candidate_keys):
-            grid_items = extract_grid_items(fragment)
-            if grid_items is not None:
-                basis = (
-                    "2-колоночный grid с ровно двумя item-блоками (<!-- item -->/<!-- item END-->), "
-                    "у каждого accent card подтверждён как один из трёх известных canonical-вариантов "
-                    "(белый/teal/коралл — GRID_ACCENT_TEMPLATES); element не выбирается — порядок "
-                    "accent'ов (лево/право) и число tag-pill в production не фиксированы, в отличие "
-                    "от canonical"
-                )
-                matches.append(RecognizedComponent(
-                    GRID_MODULE_NAME, None, order, start, end, fragment, basis, match_mode="grid_content_injection",
-                ))
-                order += 1
-                pos = end
-                continue
+            # --- класс 3: заголовки "Текстовые блоки/Заголовок NNpx" -------
+            if heading_font_sizes:
+                heading_match = _try_heading_text_injection(fragment, heading_font_sizes)
+                if heading_match is not None:
+                    module, element, _text = heading_match
+                    basis = (
+                        f"font-size внутреннего <td> однозначно совпал с canonical {module}/{element}; "
+                        f"остальное оформление (align/class/line-height/<strong> вместо font-weight) — "
+                        f"production-drift, не переносится — переносится только извлечённый текст"
+                    )
+                    matches.append(RecognizedComponent(
+                        module, element, order, start, end, fragment, basis, match_mode="heading_text_injection",
+                    ))
+                    order += 1
+                    pos = end
+                    continue
 
-        # --- класс 2: module-level "Мероприятия" ----------------------------
-        if schedule_header_signatures and candidate_keys:
-            sig = _find_schedule_header_signature(fragment)
-            if sig is not None and sig in schedule_header_signatures:
-                basis = (
-                    "day-шапка расписания (font-size/color первых двух строк) совпала с одним из "
-                    "canonical \"Мероприятия/Расписание N\"; конкретный element не выбирается — "
-                    "число событий/дней в production переменное, старый блок расписания при миграции "
-                    "всё равно отбрасывается целиком (см. letteros_migrate.py)"
-                )
-                matches.append(RecognizedComponent(
-                    SCHEDULE_MODULE_NAME, None, order, start, end, fragment, basis,
-                ))
-                order += 1
-                pos = end
-                continue
+            # --- класс 4: 2-колоночный grid "Контентные блоки/Вариант 2-4" -
+            if any(k[0] == GRID_MODULE_NAME for k in candidate_keys):
+                grid_items = extract_grid_items(fragment)
+                if grid_items is not None:
+                    basis = (
+                        "2-колоночный grid с ровно двумя item-блоками (<!-- item -->/<!-- item END-->), "
+                        "у каждого accent card подтверждён как один из трёх известных canonical-вариантов "
+                        "(белый/teal/коралл — GRID_ACCENT_TEMPLATES); element не выбирается — порядок "
+                        "accent'ов (лево/право) и число tag-pill в production не фиксированы, в отличие "
+                        "от canonical"
+                    )
+                    matches.append(RecognizedComponent(
+                        GRID_MODULE_NAME, None, order, start, end, fragment, basis, match_mode="grid_content_injection",
+                    ))
+                    order += 1
+                    pos = end
+                    continue
+
+            # --- класс 2: module-level "Мероприятия" ------------------------
+            if schedule_header_signatures:
+                sig = _find_schedule_header_signature(fragment)
+                if sig is not None and sig in schedule_header_signatures:
+                    basis = (
+                        "day-шапка расписания (font-size/color первых двух строк) совпала с одним из "
+                        "canonical \"Мероприятия/Расписание N\"; конкретный element не выбирается — "
+                        "число событий/дней в production переменное, старый блок расписания при миграции "
+                        "всё равно отбрасывается целиком (см. letteros_migrate.py)"
+                    )
+                    matches.append(RecognizedComponent(
+                        SCHEDULE_MODULE_NAME, None, order, start, end, fragment, basis,
+                    ))
+                    order += 1
+                    pos = end
+                    continue
 
         if len(confirmed) > 1:
             names = ", ".join(f"{m_}/{e_}" for m_, e_ in confirmed)
