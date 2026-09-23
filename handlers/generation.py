@@ -50,13 +50,15 @@ cancel_keyboard = ReplyKeyboardMarkup(
 
 
 class ScheduleGenStates(StatesGroup):
-    """Самостоятельный flow «Генерация расписания» — после XLSX СММ указывает
-    порог % свободных билетов (waiting_free_percent, хранится в state и
-    переиспользуется при перегенерации без повторного вопроса); после генерации
-    СММ может сколько угодно раз перегенерировать (reviewing_schedule), см.
+    """Самостоятельный flow «Генерация расписания» — после XLSX СММ выбирает режим
+    отбора по билетам (choosing_filter_mode) и указывает порог для выбранного
+    режима (waiting_filter_threshold); оба хранятся в state и переиспользуются
+    при перегенерации без повторного вопроса. После генерации СММ может сколько
+    угодно раз перегенерировать (reviewing_schedule), см.
     _deliver_schedule_result()."""
     waiting_xlsx = State()
-    waiting_free_percent = State()
+    choosing_filter_mode = State()
+    waiting_filter_threshold = State()
     reviewing_schedule = State()
     choosing_fish_branch = State()
     choosing_fish_template = State()
@@ -192,45 +194,94 @@ async def schedule_gen_receive_xlsx(message: Message, state: FSMContext) -> None
             pass
 
     await state.update_data(build_id=build_id)
-    await _ask_free_percent(message, state)
+    await _ask_filter_mode(message, state)
 
 
-async def _ask_free_percent(message: Message, state: FSMContext) -> None:
-    await state.set_state(ScheduleGenStates.waiting_free_percent)
-    await message.answer(
+# Режимы отбора события по билетам (mail_project/schedule_processor.py FILTER_MODES) —
+# текст кнопки, ключ callback_data и текст вопроса про порог для каждого режима.
+_FILTER_MODE_OPTIONS = [
+    ("percent", "Процент свободных билетов"),
+    ("remaining_min", "Осталось билетов (минимум)"),
+    ("sold_max", "Продано билетов (максимум)"),
+]
+
+_FILTER_MODE_THRESHOLD_PROMPT = {
+    "percent": (
         "Какой процент свободных билетов должен быть у мероприятия, чтобы оно попало в расписание?\n\n"
         "Например, если указать 50, в расписание попадут мероприятия, где свободно больше 50% билетов.\n\n"
-        "Введите число от 0 до 100.",
-        reply_markup=cancel_keyboard,
+        "Введите число от 0 до 100."
+    ),
+    "remaining_min": (
+        "При каком минимальном количестве оставшихся билетов мероприятие попадёт в расписание?\n\n"
+        "Например, если указать 5, в расписание попадут мероприятия, где осталось больше 5 билетов.\n\n"
+        "Введите целое число от 0."
+    ),
+    "sold_max": (
+        "При каком максимальном количестве проданных билетов мероприятие попадёт в расписание?\n\n"
+        "Например, если указать 5, в расписание попадут мероприятия, где продано меньше 5 билетов.\n\n"
+        "Введите целое число от 0."
+    ),
+}
+
+
+async def _ask_filter_mode(message: Message, state: FSMContext) -> None:
+    await state.set_state(ScheduleGenStates.choosing_filter_mode)
+    await message.answer(
+        "По какому критерию отбирать мероприятия в расписание?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=f"schedgen:mode:{mode}")]
+            for mode, label in _FILTER_MODE_OPTIONS
+        ]),
     )
 
 
-@router.message(ScheduleGenStates.waiting_free_percent, F.text == "Отмена")
-@router.message(ScheduleGenStates.waiting_free_percent, Command("cancel"))
-async def schedule_gen_cancel_percent(message: Message, state: FSMContext) -> None:
+@router.callback_query(ScheduleGenStates.choosing_filter_mode, F.data.startswith("schedgen:mode:"))
+async def schedule_gen_choose_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    filter_mode = callback.data.split(":", 2)[2]
+    await state.update_data(filter_mode=filter_mode)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.set_state(ScheduleGenStates.waiting_filter_threshold)
+    await callback.message.answer(
+        _FILTER_MODE_THRESHOLD_PROMPT[filter_mode],
+        reply_markup=cancel_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleGenStates.choosing_filter_mode, F.text == "Отмена")
+@router.message(ScheduleGenStates.choosing_filter_mode, Command("cancel"))
+@router.message(ScheduleGenStates.waiting_filter_threshold, F.text == "Отмена")
+@router.message(ScheduleGenStates.waiting_filter_threshold, Command("cancel"))
+async def schedule_gen_cancel_threshold(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Генерация расписания отменена.", reply_markup=main_menu_keyboard)
 
 
-@router.message(ScheduleGenStates.waiting_free_percent, F.text)
-async def schedule_gen_receive_percent(message: Message, state: FSMContext) -> None:
+@router.message(ScheduleGenStates.waiting_filter_threshold, F.text)
+async def schedule_gen_receive_threshold(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    filter_mode = data["filter_mode"]
+
     text = (message.text or "").strip().replace(",", ".")
     try:
-        percent = float(text)
+        threshold = float(text)
     except ValueError:
-        await message.answer("Нужно число от 0 до 100. Введите процент ещё раз.")
+        await message.answer("Нужно число. Введите порог ещё раз.")
         return
-    if not (0 <= percent <= 100):
-        await message.answer("Нужно число от 0 до 100. Введите процент ещё раз.")
+    if filter_mode == "percent":
+        if not (0 <= threshold <= 100):
+            await message.answer("Нужно число от 0 до 100. Введите процент ещё раз.")
+            return
+    elif threshold < 0:
+        await message.answer("Нужно целое число от 0. Введите порог ещё раз.")
         return
 
-    data = await state.get_data()
     build_id = data["build_id"]
-    await state.update_data(min_free_percent=percent)
+    await state.update_data(filter_threshold=threshold)
 
     await message.answer("Строю расписание...")
     try:
-        output = await gensvc.run_schedule(build_id, percent)
+        output = await gensvc.run_schedule(build_id, filter_mode, threshold)
     except gensvc.GenerationServiceError as exc:
         await state.set_state(ScheduleGenStates.waiting_xlsx)
         await message.answer(f"Не удалось построить расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel.")
@@ -239,9 +290,9 @@ async def schedule_gen_receive_percent(message: Message, state: FSMContext) -> N
     await _deliver_schedule_result(message, state, build_id, output)
 
 
-@router.message(ScheduleGenStates.waiting_free_percent)
-async def schedule_gen_percent_wrong_input(message: Message) -> None:
-    await message.answer("Ожидаю число от 0 до 100. Или отправьте /cancel для отмены.")
+@router.message(ScheduleGenStates.waiting_filter_threshold)
+async def schedule_gen_threshold_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю число. Или отправьте /cancel для отмены.")
 
 
 async def _deliver_schedule_result(message: Message, state: FSMContext, build_id: str, output: str) -> None:
@@ -283,17 +334,18 @@ def _reviewing_schedule_keyboard() -> InlineKeyboardMarkup:
 
 @router.callback_query(ScheduleGenStates.reviewing_schedule, F.data == "schedgen:regen")
 async def schedule_gen_regen(callback: CallbackQuery, state: FSMContext) -> None:
-    """Перегенерация поверх того же build/XLSX и того же порога % свободных
-    билетов (СММ не спрашивают заново) — заново читает Google Sheets
+    """Перегенерация поверх того же build/XLSX и того же режима/порога отбора по
+    билетам (СММ не спрашивают заново) — заново читает Google Sheets
     (run_schedule запускает schedule_processor.run() с нуля) и заново выдаёт
     файл/список/кнопки. Цикл может повторяться сколько угодно раз."""
     data = await state.get_data()
     build_id = data["build_id"]
-    percent = data["min_free_percent"]
+    filter_mode = data["filter_mode"]
+    threshold = data["filter_threshold"]
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer("Перегенерирую расписание...")
     try:
-        output = await gensvc.run_schedule(build_id, percent)
+        output = await gensvc.run_schedule(build_id, filter_mode, threshold)
     except gensvc.GenerationServiceError as exc:
         await callback.message.answer(
             f"Не удалось перегенерировать расписание:\n{exc}\n\nПредыдущий файл остаётся в силе.",

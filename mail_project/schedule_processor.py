@@ -48,6 +48,8 @@ REQUIRED_COLUMNS = [
     "Филиал",
 ]
 
+FILTER_MODES = ("percent", "sold_max", "remaining_min")
+
 MAX_EVENTS_PER_DATE = 20
 FALLBACK_URL_TEMPLATE = "https://engineer-history.ru/tour/{tour_id}"
 
@@ -299,7 +301,26 @@ def _build_link(tour_id: int, event_id: int, event_date: date_cls, utm_source: s
     return urlunparse(parsed._replace(query=new_qs))
 
 
-def _build_event(row: dict, sheet_cache: dict, min_free_ratio: float):
+def _passes_ticket_filter(total: float, remaining: float, filter_mode: str, threshold: float) -> bool:
+    """Раздел 2, п.3 EVENTS_RULES.md — три взаимоисключающих режима отбора,
+    СММ выбирает один при запуске генерации расписания (см. run()):
+
+    - "percent" (прежнее поведение, порог по умолчанию) — доля свободных
+      билетов строго больше threshold процентов;
+    - "sold_max" — количество проданных билетов (`Всего билетов` - `Осталось`)
+      строго меньше threshold штук;
+    - "remaining_min" — количество оставшихся билетов строго больше threshold
+      штук."""
+    if filter_mode == "percent":
+        return remaining / total > threshold / 100
+    if filter_mode == "sold_max":
+        return (total - remaining) < threshold
+    if filter_mode == "remaining_min":
+        return remaining > threshold
+    raise ValueError(f"Неизвестный filter_mode: {filter_mode!r}")
+
+
+def _build_event(row: dict, sheet_cache: dict, filter_mode: str, threshold: float):
     event_id = _to_int_or_none(row.get("ID события"))
     tour_id = _to_int_or_none(row.get("ID тура"))
     dt = _parse_datetime_cell(row.get("Дата"))
@@ -321,11 +342,11 @@ def _build_event(row: dict, sheet_cache: dict, min_free_ratio: float):
     if private is not None and str(private).strip() == "Ч":
         return None
 
-    # Раздел 2, п.3 + Раздел 2, последний абзац. Порог задаёт СММ при запуске
-    # генерации расписания (min_free_ratio = введённый процент / 100), см. run().
+    # Раздел 2, п.3 + Раздел 2, последний абзац. Режим и порог задаёт СММ при
+    # запуске генерации расписания, см. run() и _passes_ticket_filter().
     if total is None or total == 0 or remaining is None:
         return None
-    if not (remaining / total > min_free_ratio):
+    if not _passes_ticket_filter(total, remaining, filter_mode, threshold):
         return None
 
     # Раздел 6: другие значения Филиал не обрабатываются в этом формате.
@@ -366,7 +387,7 @@ def _build_event(row: dict, sheet_cache: dict, min_free_ratio: float):
     }
 
 
-def filter_events(rows: list, min_free_ratio: float) -> tuple:
+def filter_events(rows: list, filter_mode: str, threshold: float) -> tuple:
     """(events, missing) — missing: мероприятия, попавшие в расписание, чей ID
     тура не найден ни в одной строке Google Sheets листа своего филиала
     (использован fallback из XLSX/FALLBACK_URL_TEMPLATE_BY_UTM_SOURCE).
@@ -376,7 +397,7 @@ def filter_events(rows: list, min_free_ratio: float) -> tuple:
     missing_seen = set()
     missing = []
     for row in rows:
-        event = _build_event(row, sheet_cache, min_free_ratio)
+        event = _build_event(row, sheet_cache, filter_mode, threshold)
         if event is None:
             continue
         utm_source = event.pop("_utm_source")
@@ -431,10 +452,15 @@ def render_schedule(grouped: list) -> str:
     return "\n".join(lines) + "\n"
 
 
-def run(build_dir: Path, min_free_percent: float = 50.0) -> None:
-    """min_free_percent — процент свободных билетов, указанный СММ при запуске
-    генерации расписания (Раздел 2, п.3 EVENTS_RULES.md); значение по умолчанию
-    50.0 сохраняет прежнее фиксированное поведение для вызовов без параметра."""
+def run(build_dir: Path, filter_mode: str = "percent", threshold: float = 50.0) -> None:
+    """filter_mode/threshold — режим и порог отбора по билетам, указанные СММ при
+    запуске генерации расписания (Раздел 2, п.3 EVENTS_RULES.md, см.
+    _passes_ticket_filter()); значения по умолчанию сохраняют прежнее
+    фиксированное поведение (процент > 50) для вызовов без параметров."""
+    if filter_mode not in FILTER_MODES:
+        print(f"Ошибка: неизвестный режим отбора: {filter_mode}")
+        sys.exit(1)
+
     input_dir = build_dir / "input"
     xlsx_files = sorted(input_dir.glob("*.xlsx")) if input_dir.exists() else []
 
@@ -458,7 +484,7 @@ def run(build_dir: Path, min_free_percent: float = 50.0) -> None:
         print(INVALID_STRUCTURE_MESSAGE)
         sys.exit(1)
 
-    events, missing = filter_events(rows, min_free_percent / 100)
+    events, missing = filter_events(rows, filter_mode, threshold)
     grouped = group_and_limit(events)
     schedule_text = render_schedule(grouped)
 

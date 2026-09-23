@@ -7,7 +7,7 @@
     python build_manager.py create
     python build_manager.py add-input <BUILD_ID> <file> [<file> ...]
     python build_manager.py verify <BUILD_ID>
-    python build_manager.py schedule <BUILD_ID> [--min-free-percent N]
+    python build_manager.py schedule <BUILD_ID> [--filter-mode {percent,sold_max,remaining_min}] [--threshold N]
     python build_manager.py generate <BUILD_ID> <content_file>
     python build_manager.py qa <BUILD_ID>
     python build_manager.py cleanup [--days N] [--dry-run]
@@ -166,10 +166,13 @@ def cmd_schedule(args: argparse.Namespace) -> None:
     if not build_dir.exists():
         print(f"Ошибка: build {args.build_id} не найден в {BUILDS_DIR}")
         sys.exit(1)
-    if not (0 <= args.min_free_percent <= 100):
-        print("Ошибка: --min-free-percent должен быть от 0 до 100.")
+    if args.filter_mode == "percent" and not (0 <= args.threshold <= 100):
+        print("Ошибка: при --filter-mode percent порог должен быть от 0 до 100.")
         sys.exit(1)
-    schedule_processor.run(build_dir, min_free_percent=args.min_free_percent)
+    if args.filter_mode != "percent" and args.threshold < 0:
+        print("Ошибка: порог не может быть отрицательным.")
+        sys.exit(1)
+    schedule_processor.run(build_dir, filter_mode=args.filter_mode, threshold=args.threshold)
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -252,8 +255,13 @@ def main() -> None:
     )
     p_schedule.add_argument("build_id", help="BUILD_ID существующего build")
     p_schedule.add_argument(
-        "--min-free-percent", type=float, default=50.0,
-        help="Процент свободных билетов, выше которого событие попадает в расписание (0-100, по умолчанию 50)",
+        "--filter-mode", choices=list(schedule_processor.FILTER_MODES), default="percent",
+        help="Режим отбора события по билетам: percent (доля свободных), "
+             "sold_max (продано меньше threshold), remaining_min (осталось больше threshold)",
+    )
+    p_schedule.add_argument(
+        "--threshold", type=float, default=50.0,
+        help="Порог для выбранного --filter-mode (для percent — 0-100, по умолчанию 50)",
     )
 
     p_generate = subparsers.add_parser(

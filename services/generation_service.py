@@ -174,14 +174,17 @@ async def add_input(build_id: str, file_path: Path) -> None:
     await _run_build_manager("add-input", build_id, str(file_path))
 
 
-async def run_schedule(build_id: str, min_free_percent: float) -> str:
+async def run_schedule(build_id: str, filter_mode: str, threshold: float) -> str:
     """Запускает Schedule v1 (build_manager.py schedule) над XLSX, уже добавленным через add_input().
-    min_free_percent — порог % свободных билетов, указанный СММ (0-100). Безопасно
+    filter_mode/threshold — режим и порог отбора события по билетам, указанные
+    СММ (см. mail_project/schedule_processor.py FILTER_MODES). Безопасно
     вызывать повторно на том же build_id — XLSX остаётся в input/, Google Sheets
     перечитывается заново при каждом вызове (используется для «Перегенерировать
-    расписание», см. handlers/generation.py); порог при этом передаётся тот же,
-    что был указан при первом запуске."""
-    return await _run_build_manager("schedule", build_id, "--min-free-percent", str(min_free_percent))
+    расписание», см. handlers/generation.py); режим и порог при этом передаются
+    те же, что были указаны при первом запуске."""
+    return await _run_build_manager(
+        "schedule", build_id, "--filter-mode", filter_mode, "--threshold", str(threshold)
+    )
 
 
 def missing_events_from_output(output: str) -> list:
