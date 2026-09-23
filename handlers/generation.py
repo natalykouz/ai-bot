@@ -306,11 +306,15 @@ async def schedule_gen_threshold_wrong_input(message: Message) -> None:
 
 
 async def _deliver_schedule_result(message: Message, state: FSMContext, build_id: str, output: str) -> None:
-    """Выдаёт SCHEDULE.txt и предлагает «Перегенерировать»/«Оставить как есть» —
-    вызывается и после первой генерации, и после каждой перегенерации
-    (schedule_gen_regen). Список мероприятий, отсутствующих в Google Sheets,
-    определяется заново из output каждый раз, отдельно не хранится. Файл
-    выдаётся всегда, независимо от того, есть такие мероприятия или нет."""
+    """Выдаёт SCHEDULE.txt — вызывается и после первой генерации, и после каждой
+    перегенерации (schedule_gen_regen). Список мероприятий, отсутствующих в Google
+    Sheets, определяется заново из output каждый раз, отдельно не хранится. Файл
+    выдаётся всегда, независимо от того, есть такие мероприятия или нет.
+
+    «Перегенерировать»/«Создать HTML-основу письма»/«Оставить как есть» показываем
+    только если есть на что реагировать — то есть есть мероприятия, отсутствующие
+    в Google Sheets. Если таких нет, реагировать не на что — сразу завершаем flow
+    так же, как при явном «Оставить как есть» (schedule_gen_keep)."""
     schedule_path = gensvc.build_dir_for(build_id) / "schedule" / "SCHEDULE.txt"
     summary_line = _find_line(output, "Дат:")
     # Филиал здесь надёжно не определим: один XLSX/SCHEDULE.txt может содержать
@@ -323,13 +327,17 @@ async def _deliver_schedule_result(message: Message, state: FSMContext, build_id
     )
 
     missing = gensvc.missing_events_from_output(output)
-    if missing:
-        lines = ["Не найдены в Google Sheets (использованы название/ссылка из выгрузки):"]
-        lines.extend(
-            f"- {item['branch']}, ID тура {item['tour_id']}: {item['title']}"
-            for item in missing
-        )
-        await message.answer("\n".join(lines))
+    if not missing:
+        await state.clear()
+        await message.answer("Готово.", reply_markup=main_menu_keyboard)
+        return
+
+    lines = ["Не найдены в Google Sheets (использованы название/ссылка из выгрузки):"]
+    lines.extend(
+        f"- {item['branch']}, ID тура {item['tour_id']}: {item['title']}"
+        for item in missing
+    )
+    await message.answer("\n".join(lines))
 
     await state.set_state(ScheduleGenStates.reviewing_schedule)
     await message.answer(
