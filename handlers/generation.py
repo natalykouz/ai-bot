@@ -110,6 +110,16 @@ class ScheduleSwapStates(StatesGroup):
     waiting_schedule_txt = State()
 
 
+class ScheduleAddStates(StatesGroup):
+    """Самостоятельный flow «Добавить расписание в готовое письмо» — СММ присылает
+    уже собранный из блоков UniSender-шаблон целиком, в котором ЕЩЁ НЕТ ни одного
+    Schedule-блока (waiting_html), затем новый SCHEDULE.txt (waiting_schedule_txt) —
+    новые Schedule-блоки, построенные тем же canonical-генератором Schedule, что и
+    в ScheduleSwapStates, добавляются в конец письма без изменения остального HTML."""
+    waiting_html = State()
+    waiting_schedule_txt = State()
+
+
 _VARIANT_RE = re.compile(r"^Вариант\s+(\d+)$")
 
 
@@ -156,6 +166,7 @@ async def btn_email_menu(message: Message, state: FSMContext) -> None:
             [InlineKeyboardButton(text="Генерация расписания", callback_data="mail:schedule")],
             [InlineKeyboardButton(text="HTML-основа письма из SCHEDULE.txt", callback_data="mail:schedule_txt_fish")],
             [InlineKeyboardButton(text="Заменить расписание в готовом письме", callback_data="mail:schedule_swap")],
+            [InlineKeyboardButton(text="Добавить расписание в готовое письмо", callback_data="mail:schedule_add")],
         ]),
     )
 
@@ -739,6 +750,130 @@ async def cancel_schedule_swap_txt(message: Message, state: FSMContext) -> None:
 
 @router.message(ScheduleSwapStates.waiting_schedule_txt)
 async def schedule_swap_txt_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
+
+
+# =================================================================================
+# 1d. Добавить расписание в готовое письмо: СММ присылает уже собранный из блоков
+#     UniSender-шаблон целиком, в котором ещё нет ни одного Schedule-блока (этап 1 —
+#     входная проверка формата и отсутствия расписания), затем новый SCHEDULE.txt
+#     (этап 2) — новые Schedule-блоки, построенные тем же canonical-генератором
+#     Schedule (build_schedule_blocks), что и в «Заменить расписание», добавляются
+#     в конец письма. Порядок существующих блоков не меняется — пользователь при
+#     необходимости сам переставляет блоки в UniSender после импорта.
+# =================================================================================
+
+@router.callback_query(F.data == "mail:schedule_add")
+async def start_schedule_add(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ScheduleAddStates.waiting_html)
+    await callback.message.edit_text("Добавить расписание в готовое письмо.")
+    await callback.message.answer(
+        "Пришлите HTML-шаблон письма документом — целиком, собранный из блоков UniSender, "
+        "в котором ещё нет расписания.",
+        reply_markup=cancel_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleAddStates.waiting_html, F.document)
+async def receive_schedule_add_html(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or ""
+
+    html_text = ""
+    valid_format = False
+    if file_name.lower().endswith((".html", ".htm")):
+        file = await message.bot.get_file(document.file_id)
+        buf = await message.bot.download_file(file.file_path)
+        html_text = buf.read().decode("utf-8", errors="replace")
+        valid_format = bool(html_text.strip()) and gensvc.is_full_unisender_template(html_text)
+
+    if not valid_format:
+        await state.clear()
+        await message.answer(
+            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+
+    schedule_status = gensvc.schedule_blocks_status(html_text)
+    if schedule_status != "missing":
+        await state.clear()
+        await message.answer(
+            "В этом письме уже есть расписание. Чтобы заменить его, используйте "
+            "«Заменить расписание в готовом письме».",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+
+    await state.update_data(html_text=html_text)
+    await state.set_state(ScheduleAddStates.waiting_schedule_txt)
+    await message.answer(
+        "Формат подходит: это полный UniSender-шаблон, собранный из блоков, без расписания.\n\n"
+        "Пришлите файл SCHEDULE.txt документом.",
+        reply_markup=cancel_keyboard,
+    )
+
+
+@router.message(ScheduleAddStates.waiting_html, F.text == "Отмена")
+@router.message(ScheduleAddStates.waiting_html, Command("cancel"))
+async def cancel_schedule_add(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleAddStates.waiting_html)
+async def schedule_add_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
+
+
+@router.message(ScheduleAddStates.waiting_schedule_txt, F.document)
+async def receive_schedule_add_txt(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or "SCHEDULE.txt"
+    if not file_name.lower().endswith(".txt"):
+        await message.answer("Нужен текстовый файл SCHEDULE.txt. Пришлите файл ещё раз.")
+        return
+
+    data = await state.get_data()
+    html_text = data["html_text"]
+
+    file = await message.bot.get_file(document.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    content = buf.read()
+
+    await message.answer("Строю расписание...")
+    try:
+        new_blocks = await gensvc.build_schedule_replacement_blocks(content)
+    except gensvc.GenerationServiceError as exc:
+        await message.answer(
+            f"Не удалось построить расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel."
+        )
+        return
+
+    new_html = gensvc.append_schedule_blocks(html_text, new_blocks)
+
+    # Филиал здесь надёжно не определим (см. тот же комментарий у schedule_swap) —
+    # имя без филиала.
+    out_name = gensvc.next_result_filename(gensvc.RESULT_TYPE_LETTER_WITH_SCHEDULE, "html")
+    await message.answer_document(
+        BufferedInputFile(new_html.encode("utf-8"), filename=out_name),
+        caption="Готово: расписание добавлено в письмо.",
+    )
+    await state.clear()
+    await message.answer("Готово.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleAddStates.waiting_schedule_txt, F.text == "Отмена")
+@router.message(ScheduleAddStates.waiting_schedule_txt, Command("cancel"))
+async def cancel_schedule_add_txt(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleAddStates.waiting_schedule_txt)
+async def schedule_add_txt_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
 
 

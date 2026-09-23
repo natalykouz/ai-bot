@@ -325,7 +325,7 @@ def find_schedule_region(html_text: str):
     return "ok", (region_start, region_end, first_element)
 
 
-async def build_schedule_replacement_blocks(schedule_txt_content: bytes, element: str) -> list:
+async def build_schedule_replacement_blocks(schedule_txt_content: bytes, element: str | None = None) -> list:
     """«Заменить расписание в готовом письме», этап 2 — строит новые Schedule-блоки
     из загруженного SCHEDULE.txt. Переиспользует существующий Schedule-генератор
     без изменений: generation._parse_schedule_txt() (тот же парсер, что и
@@ -336,7 +336,10 @@ async def build_schedule_replacement_blocks(schedule_txt_content: bytes, element
     Без BUILD_ID/Build Manager — как и run_qa_on_html(), на актуальных
     mail_project/manifest.json + unisender_components.zip проекта. element —
     canonical-вариант Расписания (например "Расписание 3"), уже использованный
-    в загруженном письме (см. find_schedule_region)."""
+    в загруженном письме (см. find_schedule_region); также используется
+    flow «Добавить расписание в готовое письмо», где в письме ещё нет ни одного
+    Schedule-блока и element передаётся None — тогда generation.build_schedule_blocks()
+    сама берёт canonical-вариант по умолчанию (SCHEDULE_TEMPLATE["element"])."""
 
     def _run() -> list:
         with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as tmp:
@@ -365,6 +368,18 @@ def replace_schedule_region(html_text: str, region: tuple, new_blocks: list) -> 
     на место первого старого Schedule-блока) — без изменения остального HTML."""
     start, end, _element = region
     return html_text[:start] + "\n".join(new_blocks) + html_text[end:]
+
+
+def append_schedule_blocks(html_text: str, new_blocks: list) -> str:
+    """«Добавить расписание в готовое письмо» — вставляет новые Schedule-блоки в
+    конец письма, сразу после последнего top-level UniSender-блока (тот же
+    список блоков, что у is_full_unisender_template/schedule_blocks_status:
+    qa.find_components). Порядок уже существующих в письме блоков не меняется;
+    UniSender позволяет пользователю после импорта перетащить блоки в нужное
+    место самостоятельно — бот порядок не переставляет."""
+    components = qa.find_components(html_text)
+    insert_at = components[-1][3]
+    return html_text[:insert_at] + "\n" + "\n".join(new_blocks) + html_text[insert_at:]
 
 
 # --- Единое именование трёх результатов Email-flow (Расписание/РасписаниеПодложка/
