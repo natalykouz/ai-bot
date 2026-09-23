@@ -101,6 +101,15 @@ class ScheduleTxtFishStates(StatesGroup):
     choosing_template = State()
 
 
+class ScheduleSwapStates(StatesGroup):
+    """Самостоятельный flow «Заменить расписание в готовом письме» — СММ присылает уже
+    собранный из блоков UniSender-шаблон целиком (не произвольный HTML), чтобы затем
+    заменить в нём блоки Schedule на новое расписание. Пока реализован только этап 1 —
+    входная проверка формата (waiting_html); сама замена Schedule будет добавлена
+    отдельным шагом поверх этого же flow."""
+    waiting_html = State()
+
+
 _VARIANT_RE = re.compile(r"^Вариант\s+(\d+)$")
 
 
@@ -146,6 +155,7 @@ async def btn_email_menu(message: Message, state: FSMContext) -> None:
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Генерация расписания", callback_data="mail:schedule")],
             [InlineKeyboardButton(text="HTML-основа письма из SCHEDULE.txt", callback_data="mail:schedule_txt_fish")],
+            [InlineKeyboardButton(text="Заменить расписание в готовом письме", callback_data="mail:schedule_swap")],
         ]),
     )
 
@@ -213,12 +223,12 @@ _FILTER_MODE_THRESHOLD_PROMPT = {
     ),
     "remaining_min": (
         "При каком минимальном количестве оставшихся билетов мероприятие попадёт в расписание?\n\n"
-        "Например, если указать 5, в расписание попадут мероприятия, где осталось больше 5 билетов.\n\n"
+        "Например, если указать 5, в расписание попадут мероприятия, где осталось от 5 билетов.\n\n"
         "Введите целое число от 0."
     ),
     "sold_max": (
         "При каком максимальном количестве проданных билетов мероприятие попадёт в расписание?\n\n"
-        "Например, если указать 5, в расписание попадут мероприятия, где продано меньше 5 билетов.\n\n"
+        "Например, если указать 5, в расписание попадут мероприятия, где продано до 5 билетов.\n\n"
         "Введите целое число от 0."
     ),
 }
@@ -569,6 +579,81 @@ async def schedule_txt_fish_cancel(message: Message, state: FSMContext) -> None:
 @router.message(ScheduleTxtFishStates.waiting_schedule_txt)
 async def schedule_txt_fish_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
+
+
+# =================================================================================
+# 1c. Заменить расписание в готовом письме: СММ присылает уже собранный из блоков
+#     UniSender-шаблон целиком. Этап 1 (этот код) — только входная проверка формата;
+#     сама замена блоков Schedule будет реализована отдельно поверх этого же flow.
+# =================================================================================
+
+@router.callback_query(F.data == "mail:schedule_swap")
+async def start_schedule_swap(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ScheduleSwapStates.waiting_html)
+    await callback.message.edit_text("Заменить расписание в готовом письме.")
+    await callback.message.answer(
+        "Пришлите HTML-шаблон письма документом — целиком, собранный из блоков UniSender.",
+        reply_markup=cancel_keyboard,
+    )
+    await callback.answer()
+
+
+@router.message(ScheduleSwapStates.waiting_html, F.document)
+async def receive_schedule_swap_html(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or ""
+
+    html_text = ""
+    valid_format = False
+    if file_name.lower().endswith((".html", ".htm")):
+        file = await message.bot.get_file(document.file_id)
+        buf = await message.bot.download_file(file.file_path)
+        html_text = buf.read().decode("utf-8", errors="replace")
+        valid_format = bool(html_text.strip()) and gensvc.is_full_unisender_template(html_text)
+
+    if not valid_format:
+        await state.clear()
+        await message.answer(
+            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+
+    schedule_status = gensvc.schedule_blocks_status(html_text)
+    if schedule_status == "missing":
+        await state.clear()
+        await message.answer(
+            "В этом шаблоне не найден блок расписания.",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+    if schedule_status == "not_contiguous":
+        await state.clear()
+        await message.answer(
+            "Блоки расписания в этом шаблоне идут не подряд — между ними есть другой блок. "
+            "Расписание можно заменить только если все его блоки идут подряд.",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+
+    # Формат подтверждён, Schedule-блоки найдены и идут подряд — дальше существующая
+    # логика: этап 1 (входная проверка) закончен, сама замена блоков Schedule здесь
+    # пока не реализована.
+    await message.answer("Формат подходит: это полный UniSender-шаблон, собранный из блоков, с расписанием.")
+    await state.clear()
+
+
+@router.message(ScheduleSwapStates.waiting_html, F.text == "Отмена")
+@router.message(ScheduleSwapStates.waiting_html, Command("cancel"))
+async def cancel_schedule_swap(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleSwapStates.waiting_html)
+async def schedule_swap_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
 
 
 # =================================================================================

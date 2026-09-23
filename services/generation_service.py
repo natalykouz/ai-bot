@@ -221,6 +221,68 @@ async def run_qa_on_html(html_text: str) -> dict:
     return await asyncio.to_thread(_run)
 
 
+def is_full_unisender_template(html_text: str) -> bool:
+    """Входная проверка для сценария «заменить Schedule в загруженном письме» (этап 1):
+    отличает UniSender-шаблон, собранный из распознаваемых UniSender-блоков, от
+    произвольного HTML или одиночного вырванного компонента. Состав блоков не
+    фиксирован — наличие конкретных модулей (например Шапки/Подвалы) не требуется,
+    их пользователь может добавлять/заменять отдельно.
+
+    Признаки блочной структуры UniSender (все три обязательны хотя бы у одного
+    top-level блока):
+    - документ целиком, не фрагмент — есть тег <html>;
+    - есть <tr em="block" ... letteros-element="..." letteros-module="...">;
+    - границы блока корректно выделяются с учётом вложенных <tr> (тот же парсер,
+      что и у QA: qa.find_components -> generation._scan_balanced_tr_end)."""
+    if "<html" not in html_text.lower():
+        return False
+    components = qa.find_components(html_text)
+    for _module, _element, start, end in components:
+        tag_end = html_text.find(">", start)
+        if tag_end != -1 and 'em="block"' in html_text[start:tag_end]:
+            return True
+    return False
+
+
+_SCHEDULE_MODULE = "Мероприятия"
+_DIVIDER_MODULE = "Разделители"
+
+
+def schedule_blocks_status(html_text: str) -> str:
+    """Продолжение входной проверки для сценария «заменить Schedule в загруженном
+    письме» (этап 1, вызывается после is_full_unisender_template) — не про саму
+    замену, только про то, что и где менять можно однозначно.
+
+    Schedule-блок — top-level блок с letteros-module="Мероприятия" и
+    letteros-element, начинающимся с "Расписание" (тот же список top-level
+    блоков, что и в is_full_unisender_template: qa.find_components).
+
+    Возвращает:
+    - "missing" — в шаблоне нет ни одного Schedule-блока;
+    - "not_contiguous" — Schedule-блоки есть, но между первым и последним
+      найден другой top-level блок, который не является визуальным
+      разделителем (letteros-module="Разделители" — отступ/линия допускаются
+      между Schedule-блоками, любой другой модуль — нет);
+    - "ok" — один или несколько Schedule-блоков идут подряд (с разделителями
+      или без), однозначно заменяемы."""
+    components = qa.find_components(html_text)
+    schedule_idx = [
+        i for i, (module, element, _start, _end) in enumerate(components)
+        if module == _SCHEDULE_MODULE and element.startswith("Расписание")
+    ]
+    if not schedule_idx:
+        return "missing"
+
+    first_idx, last_idx = schedule_idx[0], schedule_idx[-1]
+    for i in range(first_idx, last_idx + 1):
+        if i in schedule_idx:
+            continue
+        module, _element, _start, _end = components[i]
+        if module != _DIVIDER_MODULE:
+            return "not_contiguous"
+    return "ok"
+
+
 def fish_branch_options() -> list:
     """Филиалы, для которых есть отдельный Editor Template («HTML-основа письма»,
     см. generation.EDITOR_TEMPLATE_PATHS) — фиксированный список из трёх филиалов,

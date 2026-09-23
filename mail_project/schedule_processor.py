@@ -308,15 +308,17 @@ def _passes_ticket_filter(total: float, remaining: float, filter_mode: str, thre
     - "percent" (прежнее поведение, порог по умолчанию) — доля свободных
       билетов строго больше threshold процентов;
     - "sold_max" — количество проданных билетов (`Всего билетов` - `Осталось`)
-      строго меньше threshold штук;
-    - "remaining_min" — количество оставшихся билетов строго больше threshold
-      штук."""
+      меньше или равно threshold штук (нестрогое неравенство — порог 5
+      пропускает события, где продано ровно 5 билетов);
+    - "remaining_min" — количество оставшихся билетов больше или равно
+      threshold штук (нестрогое неравенство — порог 5 пропускает события,
+      где осталось ровно 5 билетов)."""
     if filter_mode == "percent":
         return remaining / total > threshold / 100
     if filter_mode == "sold_max":
-        return (total - remaining) < threshold
+        return (total - remaining) <= threshold
     if filter_mode == "remaining_min":
-        return remaining > threshold
+        return remaining >= threshold
     raise ValueError(f"Неизвестный filter_mode: {filter_mode!r}")
 
 
