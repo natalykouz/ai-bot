@@ -248,51 +248,6 @@ def _remove_hide_row(html: str, hide_name: str) -> str:
     return html[:start] + html[end:]
 
 
-def _scan_balanced_td_end(html: str, start: int) -> int:
-    """Тот же принцип, что и _scan_balanced_tr_end(), но для <td ...>...</td> --
-    нужен для _remove_hide_td() (см. её docstring)."""
-    open_re = re.compile(r"<td\b", re.IGNORECASE)
-    close_re = re.compile(r"</td\s*>", re.IGNORECASE)
-    depth = 1
-    pos = start + 3
-    while depth > 0:
-        m_open = open_re.search(html, pos)
-        m_close = close_re.search(html, pos)
-        if m_close is None:
-            raise GenerationError("Не удалось найти закрывающий </td> в каноническом компоненте")
-        if m_open is not None and m_open.start() < m_close.start():
-            depth += 1
-            pos = m_open.end()
-        else:
-            depth -= 1
-            pos = m_close.end()
-    return pos
-
-
-def _get_hide_td_span(html: str, hide_name: str, occurrence: int = 0):
-    pattern = re.compile(r'<td\b[^>]*letteros-hide="' + re.escape(hide_name) + r'"[^>]*>')
-    matches = list(pattern.finditer(html))
-    if occurrence >= len(matches):
-        return None
-    start = matches[occurrence].start()
-    end = _scan_balanced_td_end(html, start)
-    return start, end
-
-
-def _remove_hide_td(html: str, hide_name: str) -> str:
-    """Тот же принцип "родной опциональности компонента", что и у _remove_hide_row()
-    (см. её docstring), но для одного из НЕСКОЛЬКИХ одноуровневых опциональных
-    <td letteros-hide="hide_name">...</td> внутри одной <tr> (например, один из
-    двух tag-pill'ов "Контентные блоки/Вариант 2-4" -- letteros-hide="ярлык в
-    левом/правом блоке 1/2"), а не <tr>-строку целиком. Соседний <td> (второй
-    tag-pill) и остальные узлы canonical skeleton не затрагиваются."""
-    span = _get_hide_td_span(html, hide_name)
-    if span is None:
-        return html
-    start, end = span
-    return html[:start] + html[end:]
-
-
 def _replace_text_once(html: str, sample_text: str, real_text: str) -> str:
     if sample_text not in html:
         raise GenerationError(f"Образец текста компонента не найден в HTML: {sample_text!r}")
