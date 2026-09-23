@@ -5,3 +5,4 @@ __pycache__/
 *.pyo
 bot-admin/
 prompts/auth.json
+mail_project/results/

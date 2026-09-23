@@ -103,11 +103,11 @@ class ScheduleTxtFishStates(StatesGroup):
 
 class ScheduleSwapStates(StatesGroup):
     """Самостоятельный flow «Заменить расписание в готовом письме» — СММ присылает уже
-    собранный из блоков UniSender-шаблон целиком (не произвольный HTML), чтобы затем
-    заменить в нём блоки Schedule на новое расписание. Пока реализован только этап 1 —
-    входная проверка формата (waiting_html); сама замена Schedule будет добавлена
-    отдельным шагом поверх этого же flow."""
+    собранный из блоков UniSender-шаблон целиком (не произвольный HTML, waiting_html),
+    затем новый SCHEDULE.txt (waiting_schedule_txt) — старый Schedule-регион в шаблоне
+    заменяется на новые блоки, построенные тем же canonical-генератором Schedule."""
     waiting_html = State()
+    waiting_schedule_txt = State()
 
 
 _VARIANT_RE = re.compile(r"^Вариант\s+(\d+)$")
@@ -313,8 +313,12 @@ async def _deliver_schedule_result(message: Message, state: FSMContext, build_id
     выдаётся всегда, независимо от того, есть такие мероприятия или нет."""
     schedule_path = gensvc.build_dir_for(build_id) / "schedule" / "SCHEDULE.txt"
     summary_line = _find_line(output, "Дат:")
+    # Филиал здесь надёжно не определим: один XLSX/SCHEDULE.txt может содержать
+    # события нескольких филиалов одновременно (см. schedule_processor.py) — имя
+    # без филиала.
+    out_name = gensvc.next_result_filename(gensvc.RESULT_TYPE_SCHEDULE, "txt")
     await message.answer_document(
-        BufferedInputFile(schedule_path.read_bytes(), filename="SCHEDULE.txt"),
+        BufferedInputFile(schedule_path.read_bytes(), filename=out_name),
         caption=f"BUILD_ID: {build_id}. {summary_line}".strip(),
     )
 
@@ -439,8 +443,9 @@ async def schedule_gen_fish_choose(callback: CallbackQuery, state: FSMContext) -
         await callback.answer()
         return
 
+    out_name = gensvc.next_result_filename(gensvc.RESULT_TYPE_SCHEDULE_FISH, "html", branch=branch)
     await callback.message.answer_document(
-        BufferedInputFile(fish_path.read_bytes(), filename=fish_path.name),
+        BufferedInputFile(fish_path.read_bytes(), filename=out_name),
         caption=f"BUILD_ID: {build_id}. {branch}. {element}.",
     )
     await state.set_state(ScheduleGenStates.reviewing_schedule)
@@ -560,8 +565,9 @@ async def schedule_txt_fish_choose_template(callback: CallbackQuery, state: FSMC
         await callback.answer()
         return
 
+    out_name = gensvc.next_result_filename(gensvc.RESULT_TYPE_SCHEDULE_FISH, "html", branch=branch)
     await callback.message.answer_document(
-        BufferedInputFile(fish_path.read_bytes(), filename=fish_path.name),
+        BufferedInputFile(fish_path.read_bytes(), filename=out_name),
         caption=f"BUILD_ID: {build_id}. {branch}. {element}.",
     )
     await state.clear()
@@ -583,8 +589,10 @@ async def schedule_txt_fish_wrong_input(message: Message) -> None:
 
 # =================================================================================
 # 1c. Заменить расписание в готовом письме: СММ присылает уже собранный из блоков
-#     UniSender-шаблон целиком. Этап 1 (этот код) — только входная проверка формата;
-#     сама замена блоков Schedule будет реализована отдельно поверх этого же flow.
+#     UniSender-шаблон целиком (этап 1 — входная проверка формата и Schedule-региона),
+#     затем новый SCHEDULE.txt (этап 2) — старый Schedule-регион заменяется на новые
+#     блоки, построенные тем же canonical-генератором Schedule (build_schedule_blocks),
+#     что и во всех остальных Schedule-flow.
 # =================================================================================
 
 @router.callback_query(F.data == "mail:schedule_swap")
@@ -637,11 +645,28 @@ async def receive_schedule_swap_html(message: Message, state: FSMContext) -> Non
         )
         return
 
-    # Формат подтверждён, Schedule-блоки найдены и идут подряд — дальше существующая
-    # логика: этап 1 (входная проверка) закончен, сама замена блоков Schedule здесь
-    # пока не реализована.
-    await message.answer("Формат подходит: это полный UniSender-шаблон, собранный из блоков, с расписанием.")
-    await state.clear()
+    # Формат подтверждён, Schedule-блоки найдены и идут подряд — берём точные границы
+    # региона тем же алгоритмом (find_schedule_region), что и schedule_blocks_status.
+    # Несовпадение статуса здесь означало бы рассинхронизацию двух функций — на
+    # случай такого (не должно происходить) не чиним автоматически, а тоже
+    # останавливаем flow.
+    region_status, region = gensvc.find_schedule_region(html_text)
+    if region_status != "ok" or region is None:
+        await state.clear()
+        await message.answer(
+            "Не удалось однозначно определить границы блока расписания в этом шаблоне. "
+            "Замена не выполнена.",
+            reply_markup=main_menu_keyboard,
+        )
+        return
+
+    await state.update_data(html_text=html_text, region=region)
+    await state.set_state(ScheduleSwapStates.waiting_schedule_txt)
+    await message.answer(
+        "Формат подходит: это полный UniSender-шаблон, собранный из блоков, с расписанием.\n\n"
+        "Пришлите новый файл SCHEDULE.txt документом.",
+        reply_markup=cancel_keyboard,
+    )
 
 
 @router.message(ScheduleSwapStates.waiting_html, F.text == "Отмена")
@@ -654,6 +679,59 @@ async def cancel_schedule_swap(message: Message, state: FSMContext) -> None:
 @router.message(ScheduleSwapStates.waiting_html)
 async def schedule_swap_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
+
+
+@router.message(ScheduleSwapStates.waiting_schedule_txt, F.document)
+async def receive_schedule_swap_txt(message: Message, state: FSMContext) -> None:
+    document = message.document
+    file_name = document.file_name or "SCHEDULE.txt"
+    if not file_name.lower().endswith(".txt"):
+        await message.answer("Нужен текстовый файл SCHEDULE.txt. Пришлите файл ещё раз.")
+        return
+
+    data = await state.get_data()
+    html_text = data["html_text"]
+    region = tuple(data["region"])  # (start, end, element)
+    element = region[2]
+
+    file = await message.bot.get_file(document.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    content = buf.read()
+
+    await message.answer("Строю новое расписание...")
+    try:
+        new_blocks = await gensvc.build_schedule_replacement_blocks(content, element)
+    except gensvc.GenerationServiceError as exc:
+        await message.answer(
+            f"Не удалось построить новое расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel."
+        )
+        return
+
+    new_html = gensvc.replace_schedule_region(html_text, region, new_blocks)
+
+    # Филиал здесь надёжно не определим: пользователь загружает произвольный
+    # UniSender-шаблон, шапка (если есть) не гарантированно соответствует
+    # фактическому филиалу письма (см. анализ реального экспорта — заголовок
+    # «Москва 3» встречался в письме для другого филиала) — имя без филиала.
+    out_name = gensvc.next_result_filename(gensvc.RESULT_TYPE_LETTER_WITH_SCHEDULE, "html")
+    await message.answer_document(
+        BufferedInputFile(new_html.encode("utf-8"), filename=out_name),
+        caption="Готово: расписание в шаблоне заменено.",
+    )
+    await state.clear()
+    await message.answer("Готово.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleSwapStates.waiting_schedule_txt, F.text == "Отмена")
+@router.message(ScheduleSwapStates.waiting_schedule_txt, Command("cancel"))
+async def cancel_schedule_swap_txt(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleSwapStates.waiting_schedule_txt)
+async def schedule_swap_txt_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю файл SCHEDULE.txt документом. Или отправьте /cancel для отмены.")
 
 
 # =================================================================================

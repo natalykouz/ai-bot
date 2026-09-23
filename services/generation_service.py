@@ -16,6 +16,8 @@ import io
 import json
 import os
 import sys
+import tempfile
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,7 @@ MAIL_PROJECT_DIR = PROJECT_ROOT / "mail_project"
 BUILD_MANAGER_PY = MAIL_PROJECT_DIR / "build_manager.py"
 MANIFEST_PATH = MAIL_PROJECT_DIR / "manifest.json"
 BUILDS_DIR = MAIL_PROJECT_DIR / "builds"
+RESULTS_SEQ_DIR = MAIL_PROJECT_DIR / "results" / "_sequence"
 
 if str(MAIL_PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(MAIL_PROJECT_DIR))
@@ -281,6 +284,132 @@ def schedule_blocks_status(html_text: str) -> str:
         if module != _DIVIDER_MODULE:
             return "not_contiguous"
     return "ok"
+
+
+def find_schedule_region(html_text: str):
+    """«Заменить расписание в готовом письме», этап 2 — та же логика поиска и
+    проверки смежности Schedule-блоков, что и в schedule_blocks_status() (эта
+    функция не меняется), но дополнительно возвращает точные границы старого
+    Schedule-региона для физической замены. Отдельная функция с продублированным
+    отбором/проверкой смежности — чтобы не трогать уже проверенный код
+    schedule_blocks_status().
+
+    Возвращает (status, region):
+    - status — тот же набор значений, что и у schedule_blocks_status
+      ("missing"/"not_contiguous"/"ok");
+    - region — при status == "ok" кортеж (start, end, element): start/end —
+      границы региона в html_text от начала первого Schedule-блока до конца
+      последнего (включая допустимые между ними Разделители), element —
+      letteros-element первого найденного Schedule-блока (тот же
+      canonical-вариант Расписания используется для новых блоков, чтобы
+      сохранить визуал письма); при любом другом status region — None."""
+    components = qa.find_components(html_text)
+    schedule_idx = [
+        i for i, (module, element, _start, _end) in enumerate(components)
+        if module == _SCHEDULE_MODULE and element.startswith("Расписание")
+    ]
+    if not schedule_idx:
+        return "missing", None
+
+    first_idx, last_idx = schedule_idx[0], schedule_idx[-1]
+    for i in range(first_idx, last_idx + 1):
+        if i in schedule_idx:
+            continue
+        module, _element, _start, _end = components[i]
+        if module != _DIVIDER_MODULE:
+            return "not_contiguous", None
+
+    region_start = components[first_idx][2]
+    region_end = components[last_idx][3]
+    first_element = components[first_idx][1]
+    return "ok", (region_start, region_end, first_element)
+
+
+async def build_schedule_replacement_blocks(schedule_txt_content: bytes, element: str) -> list:
+    """«Заменить расписание в готовом письме», этап 2 — строит новые Schedule-блоки
+    из загруженного SCHEDULE.txt. Переиспользует существующий Schedule-генератор
+    без изменений: generation._parse_schedule_txt() (тот же парсер, что и
+    build_schedule_fish()) и generation.build_schedule_blocks() (тот же
+    генератор canonical Schedule, что и во всех остальных Schedule-flow) —
+    HTML-логика Schedule не дублируется и не переписывается.
+
+    Без BUILD_ID/Build Manager — как и run_qa_on_html(), на актуальных
+    mail_project/manifest.json + unisender_components.zip проекта. element —
+    canonical-вариант Расписания (например "Расписание 3"), уже использованный
+    в загруженном письме (см. find_schedule_region)."""
+
+    def _run() -> list:
+        with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as tmp:
+            tmp.write(schedule_txt_content)
+            tmp_path = Path(tmp.name)
+        try:
+            groups = generation._parse_schedule_txt(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        if not groups:
+            raise GenerationServiceError("SCHEDULE.txt не содержит ни одного события.")
+
+        library = generation.ComponentLibrary(MANIFEST_PATH, UNISENDER_ZIP_PATH)
+        try:
+            return generation.build_schedule_blocks(library, groups, element)
+        except generation.GenerationError as exc:
+            raise GenerationServiceError(str(exc)) from exc
+
+    return await asyncio.to_thread(_run)
+
+
+def replace_schedule_region(html_text: str, region: tuple, new_blocks: list) -> str:
+    """Физическая замена: удаляет старый Schedule-регион (region — из
+    find_schedule_region) целиком и вставляет новые блоки на его место (то есть
+    на место первого старого Schedule-блока) — без изменения остального HTML."""
+    start, end, _element = region
+    return html_text[:start] + "\n".join(new_blocks) + html_text[end:]
+
+
+# --- Единое именование трёх результатов Email-flow (Расписание/РасписаниеПодложка/
+# ПисьмоСРасписанием) — "[Филиал_]ТипРезультата_YYYYMMDD-NNN.расширение". ------------
+
+RESULT_TYPE_SCHEDULE = "Расписание"
+RESULT_TYPE_SCHEDULE_FISH = "РасписаниеПодложка"
+RESULT_TYPE_LETTER_WITH_SCHEDULE = "ПисьмоСРасписанием"
+
+
+def _next_result_seq(today: str) -> int:
+    """Единый дневной счётчик NNN — общий на все три типа результатов, а не
+    отдельный на каждый (иначе имена совпадали бы при выдаче разных типов в один
+    день). Тот же принцип, что у build_manager.next_build_id() (скан каталога на
+    маркеры вида "<today>-NNN", max+1) — отдельный каталог, не builds/: одна
+    выдача результата не обязана совпадать с созданием build'а (например,
+    расписание можно перегенерировать несколько раз в одном build — несколько
+    результатов на один BUILD_ID), а build_manager.py как CLI-скрипт (subprocess,
+    см. модульный docstring) напрямую не импортируется и не меняется."""
+    RESULTS_SEQ_DIR.mkdir(parents=True, exist_ok=True)
+    existing = []
+    for p in RESULTS_SEQ_DIR.iterdir():
+        if p.is_file() and p.name.startswith(f"{today}-"):
+            suffix = p.name.split("-", 1)[1]
+            if suffix.isdigit():
+                existing.append(int(suffix))
+    n = max(existing, default=0) + 1
+    (RESULTS_SEQ_DIR / f"{today}-{n:03d}").touch()
+    return n
+
+
+def next_result_filename(result_type: str, extension: str, branch: str | None = None) -> str:
+    """Единое имя файла для одного из трёх результатов Email-flow — формат
+    "[Филиал_]ТипРезультата_YYYYMMDD-NNN.расширение" (result_type — одна из
+    RESULT_TYPE_* констант). branch подставляется в начало имени только если
+    передан явно — в конкретном flow филиал может быть надёжно недоступен
+    (например, «Генерация расписания» может смешивать события нескольких
+    филиалов в одном SCHEDULE.txt), тогда вызывающий код передаёт None и имя
+    начинается сразу с типа результата. NNN — общий на все три типа счётчик за
+    текущую дату (_next_result_seq), поэтому повторная выдача любого из трёх
+    типов в один день получает разные NNN и имена не повторяются."""
+    today = datetime.now().strftime("%Y%m%d")
+    n = _next_result_seq(today)
+    prefix = f"{branch}_" if branch else ""
+    return f"{prefix}{result_type}_{today}-{n:03d}.{extension}"
 
 
 def fish_branch_options() -> list:
