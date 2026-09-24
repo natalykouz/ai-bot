@@ -278,6 +278,11 @@ async def schedule_gen_cancel_threshold(message: Message, state: FSMContext) -> 
     await message.answer("Генерация расписания отменена.", reply_markup=main_menu_keyboard)
 
 
+@router.message(ScheduleGenStates.choosing_filter_mode)
+async def schedule_gen_mode_wrong_input(message: Message) -> None:
+    await message.answer("Выберите режим отбора кнопкой выше. Или отправьте /cancel для отмены.")
+
+
 @router.message(ScheduleGenStates.waiting_filter_threshold, F.text)
 async def schedule_gen_receive_threshold(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
