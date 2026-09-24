@@ -477,6 +477,32 @@ async def schedule_gen_fish_choose(callback: CallbackQuery, state: FSMContext) -
     await callback.answer()
 
 
+@router.message(ScheduleGenStates.reviewing_schedule, F.text == "Отмена")
+@router.message(ScheduleGenStates.reviewing_schedule, Command("cancel"))
+@router.message(ScheduleGenStates.choosing_fish_branch, F.text == "Отмена")
+@router.message(ScheduleGenStates.choosing_fish_branch, Command("cancel"))
+@router.message(ScheduleGenStates.choosing_fish_template, F.text == "Отмена")
+@router.message(ScheduleGenStates.choosing_fish_template, Command("cancel"))
+async def schedule_gen_cancel_review_fish(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Генерация расписания отменена.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleGenStates.reviewing_schedule)
+async def schedule_gen_reviewing_wrong_input(message: Message) -> None:
+    await message.answer("Выберите действие кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(ScheduleGenStates.choosing_fish_branch)
+async def schedule_gen_fish_branch_wrong_input(message: Message) -> None:
+    await message.answer("Выберите филиал кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(ScheduleGenStates.choosing_fish_template)
+async def schedule_gen_fish_template_wrong_input(message: Message) -> None:
+    await message.answer("Выберите вид расписания кнопкой выше. Или отправьте /cancel для отмены.")
+
+
 @router.message(ScheduleGenStates.waiting_xlsx, F.text == "Отмена")
 @router.message(ScheduleGenStates.waiting_xlsx, Command("cancel"))
 async def schedule_gen_cancel(message: Message, state: FSMContext) -> None:
@@ -599,6 +625,25 @@ async def schedule_txt_fish_choose_template(callback: CallbackQuery, state: FSMC
     await callback.answer()
 
 
+@router.message(ScheduleTxtFishStates.choosing_branch, F.text == "Отмена")
+@router.message(ScheduleTxtFishStates.choosing_branch, Command("cancel"))
+@router.message(ScheduleTxtFishStates.choosing_template, F.text == "Отмена")
+@router.message(ScheduleTxtFishStates.choosing_template, Command("cancel"))
+async def schedule_txt_fish_cancel_choice(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleTxtFishStates.choosing_branch)
+async def schedule_txt_fish_branch_wrong_input(message: Message) -> None:
+    await message.answer("Выберите филиал кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(ScheduleTxtFishStates.choosing_template)
+async def schedule_txt_fish_template_wrong_input(message: Message) -> None:
+    await message.answer("Выберите вид расписания кнопкой выше. Или отправьте /cancel для отмены.")
+
+
 @router.message(ScheduleTxtFishStates.waiting_schedule_txt, F.text == "Отмена")
 @router.message(ScheduleTxtFishStates.waiting_schedule_txt, Command("cancel"))
 async def schedule_txt_fish_cancel(message: Message, state: FSMContext) -> None:
@@ -645,10 +690,11 @@ async def receive_schedule_swap_html(message: Message, state: FSMContext) -> Non
         valid_format = bool(html_text.strip()) and gensvc.is_full_unisender_template(html_text)
 
     if not valid_format:
-        await state.clear()
+        await state.set_state(ScheduleSwapStates.waiting_html)
         await message.answer(
-            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком",
-            reply_markup=main_menu_keyboard,
+            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком. "
+            "Пришлите HTML-шаблон письма документом ещё раз.",
+            reply_markup=cancel_keyboard,
         )
         return
 
@@ -1205,6 +1251,11 @@ async def receive_component_name(message: Message, state: FSMContext) -> None:
     await _add_component_by_name(message, state, message.text.strip())
 
 
+@router.message(LetterGenStates.waiting_component_name)
+async def waiting_component_name_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю название компонента текстом. Или отправьте /cancel для отмены.")
+
+
 async def _add_component_by_name(message: Message, state: FSMContext, name: str) -> None:
     found = gensvc.find_content_component(name)
     if found is None:
@@ -1346,6 +1397,11 @@ async def receive_single_field_value(message: Message, state: FSMContext) -> Non
     await _content_added(message, state, module, element, texts)
 
 
+@router.message(LetterGenStates.waiting_single_field_value)
+async def waiting_single_field_value_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю текстовое значение. Или отправьте /cancel для отмены.")
+
+
 # ===================================================================================
 # СТАРЫЙ многошаговый flow заполнения ВСЕХ полей компонента (по одному вопросу на
 # каждую позицию sample_text) — заменён упрощённым режимом «одно поле» выше.
@@ -1452,6 +1508,11 @@ async def receive_content_text(message: Message, state: FSMContext) -> None:
     await _content_added(message, state, module, element, lines)
 
 
+@router.message(LetterGenStates.waiting_content_text)
+async def waiting_content_text_wrong_input(message: Message) -> None:
+    await message.answer("Ожидаю текст содержимого компонента. Или отправьте /cancel для отмены.")
+
+
 async def _content_added(message: Message, state: FSMContext, module: str, element: str, texts: list) -> None:
     data = await state.get_data()
     blocks = data.get("content_blocks", [])
@@ -1485,6 +1546,65 @@ async def _content_added(message: Message, state: FSMContext, module: str, eleme
 #         ]]),
 #     )
 #     await callback.answer()
+
+
+# Шаги «Генерации письма», ожидающие только нажатия inline-кнопки (без своего
+# message-хендлера для текста/документа) — раньше нештатный ввод (текст, файл)
+# на этих шагах проваливался в общий catch-all handlers/contract.py (F.document/
+# handle_text), теряя весь прогресс сборки письма. Явные cancel-хендлеры здесь
+# дают тот же результат (сброс + главное меню), что и раньше давал общий /cancel
+# из contract.py, но не отдают ввод в чужой flow.
+@router.message(LetterGenStates.choosing_branch, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_branch, Command("cancel"))
+@router.message(LetterGenStates.choosing_schedule_choice, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_schedule_choice, Command("cancel"))
+@router.message(LetterGenStates.choosing_schedule_template, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_schedule_template, Command("cancel"))
+@router.message(LetterGenStates.choosing_header, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_header, Command("cancel"))
+@router.message(LetterGenStates.choosing_hero, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_hero, Command("cancel"))
+@router.message(LetterGenStates.choosing_footer, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_footer, Command("cancel"))
+@router.message(LetterGenStates.choosing_add_more, F.text == "Отмена")
+@router.message(LetterGenStates.choosing_add_more, Command("cancel"))
+async def cancel_letter_gen_choice_step(message: Message, state: FSMContext) -> None:
+    await _cancel_letter_gen(message, state)
+
+
+@router.message(LetterGenStates.choosing_branch)
+async def choosing_branch_wrong_input(message: Message) -> None:
+    await message.answer("Выберите филиал кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_schedule_choice)
+async def choosing_schedule_choice_wrong_input(message: Message) -> None:
+    await message.answer("Выберите «Да» или «Нет» кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_schedule_template)
+async def choosing_schedule_template_wrong_input(message: Message) -> None:
+    await message.answer("Выберите вариант расписания кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_header)
+async def choosing_header_wrong_input(message: Message) -> None:
+    await message.answer("Выберите компонент Шапки кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_hero)
+async def choosing_hero_wrong_input(message: Message) -> None:
+    await message.answer("Выберите компонент Баннеры кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_footer)
+async def choosing_footer_wrong_input(message: Message) -> None:
+    await message.answer("Выберите компонент Подвалы кнопкой выше. Или отправьте /cancel для отмены.")
+
+
+@router.message(LetterGenStates.choosing_add_more)
+async def choosing_add_more_wrong_input(message: Message) -> None:
+    await message.answer("Выберите действие кнопкой выше. Или отправьте /cancel для отмены.")
 
 
 # --- завершение --------------------------------------------------------------------
@@ -1589,6 +1709,13 @@ async def receive_qa_html(message: Message, state: FSMContext) -> None:
     )
     await state.clear()
     await message.answer("Готово.", reply_markup=main_menu_keyboard)
+
+
+@router.message(QAStates.waiting_html, F.text == "Отмена")
+@router.message(QAStates.waiting_html, Command("cancel"))
+async def cancel_qa(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
 
 
 @router.message(QAStates.waiting_html)
