@@ -790,10 +790,11 @@ async def receive_schedule_add_html(message: Message, state: FSMContext) -> None
         valid_format = bool(html_text.strip()) and gensvc.is_full_unisender_template(html_text)
 
     if not valid_format:
-        await state.clear()
+        await state.set_state(ScheduleAddStates.waiting_html)
         await message.answer(
-            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком",
-            reply_markup=main_menu_keyboard,
+            "Извините, этот файл не подходит, нужен шаблон Юнисендер составленный из блоков целиком. "
+            "Пришлите HTML-шаблон письма документом ещё раз.",
+            reply_markup=cancel_keyboard,
         )
         return
 
