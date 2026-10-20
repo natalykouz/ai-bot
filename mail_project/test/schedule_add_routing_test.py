@@ -164,15 +164,15 @@ def test_invalid_then_valid_html_stays_in_schedule_add_flow() -> None:
         await dp.feed_update(bot, _document_update(3, 3, "good-html", "good.html"))
 
         state_after_valid = await storage.get_state(key)
-        assert state_after_valid == generation.ScheduleAddStates.waiting_schedule_txt.state, (
-            f"после валидного HTML flow должен перейти к waiting_schedule_txt, а получили: "
+        assert state_after_valid == generation.ScheduleAddStates.choosing_template.state, (
+            f"после валидного HTML flow должен перейти к choosing_template, а получили: "
             f"{state_after_valid!r}"
         )
         assert not any("Поддерживаются только" in t for t in session.sent_texts), (
             "валидный .html не должен попадать в contract.handle_document"
         )
-        assert any("SCHEDULE.txt" in t for t in session.sent_texts), (
-            "ожидалось приглашение прислать SCHEDULE.txt"
+        assert any("вид расписания" in t for t in session.sent_texts), (
+            "ожидался вопрос про выбор вида расписания"
         )
 
         await bot.session.close()

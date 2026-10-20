@@ -104,19 +104,25 @@ class ScheduleTxtFishStates(StatesGroup):
 class ScheduleSwapStates(StatesGroup):
     """Самостоятельный flow «Заменить расписание в готовом письме» — СММ присылает уже
     собранный из блоков UniSender-шаблон целиком (не произвольный HTML, waiting_html),
-    затем новый SCHEDULE.txt (waiting_schedule_txt) — старый Schedule-регион в шаблоне
-    заменяется на новые блоки, построенные тем же canonical-генератором Schedule."""
+    затем выбирает вид расписания (choosing_template — SCHEDULE.txt несёт только
+    список событий, не визуальный вариант), затем новый SCHEDULE.txt
+    (waiting_schedule_txt) — старый Schedule-регион в шаблоне заменяется на новые
+    блоки, построенные тем же canonical-генератором Schedule."""
     waiting_html = State()
+    choosing_template = State()
     waiting_schedule_txt = State()
 
 
 class ScheduleAddStates(StatesGroup):
     """Самостоятельный flow «Добавить расписание в готовое письмо» — СММ присылает
     уже собранный из блоков UniSender-шаблон целиком, в котором ЕЩЁ НЕТ ни одного
-    Schedule-блока (waiting_html), затем новый SCHEDULE.txt (waiting_schedule_txt) —
-    новые Schedule-блоки, построенные тем же canonical-генератором Schedule, что и
-    в ScheduleSwapStates, добавляются в конец письма без изменения остального HTML."""
+    Schedule-блока (waiting_html), затем выбирает вид расписания (choosing_template,
+    тот же смысл, что и в ScheduleSwapStates), затем новый SCHEDULE.txt
+    (waiting_schedule_txt) — новые Schedule-блоки, построенные тем же
+    canonical-генератором Schedule, что и в ScheduleSwapStates, добавляются в конец
+    письма без изменения остального HTML."""
     waiting_html = State()
+    choosing_template = State()
     waiting_schedule_txt = State()
 
 
@@ -731,12 +737,37 @@ async def receive_schedule_swap_html(message: Message, state: FSMContext) -> Non
         return
 
     await state.update_data(html_text=html_text, region=region)
-    await state.set_state(ScheduleSwapStates.waiting_schedule_txt)
+    await _ask_schedule_swap_template(message, state, "Формат подходит: это полный UniSender-шаблон, собранный из блоков, с расписанием.")
+
+
+async def _ask_schedule_swap_template(message: Message, state: FSMContext, intro: str) -> None:
+    options = gensvc.schedule_template_options()
+    await state.update_data(_schedule_swap_template_list=options)
+    await state.set_state(ScheduleSwapStates.choosing_template)
+    buttons = [
+        InlineKeyboardButton(text=str(i + 1), callback_data=f"schedswap:tpl:{i}")
+        for i in range(len(options))
+    ]
+    await message.answer(intro)
     await message.answer(
-        "Формат подходит: это полный UniSender-шаблон, собранный из блоков, с расписанием.\n\n"
+        "Выберите вид расписания (SCHEDULE.txt несёт только список событий, не визуальный вариант):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+    )
+
+
+@router.callback_query(ScheduleSwapStates.choosing_template, F.data.startswith("schedswap:tpl:"))
+async def choose_schedule_swap_template(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    element = data["_schedule_swap_template_list"][idx]
+    await state.update_data(schedule_template=element)
+    await state.set_state(ScheduleSwapStates.waiting_schedule_txt)
+    await callback.message.edit_text(f"Расписание: {element}")
+    await callback.message.answer(
         "Пришлите новый файл SCHEDULE.txt документом.",
         reply_markup=cancel_keyboard,
     )
+    await callback.answer()
 
 
 @router.message(ScheduleSwapStates.waiting_html, F.text == "Отмена")
@@ -751,6 +782,18 @@ async def schedule_swap_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
 
 
+@router.message(ScheduleSwapStates.choosing_template, F.text == "Отмена")
+@router.message(ScheduleSwapStates.choosing_template, Command("cancel"))
+async def cancel_schedule_swap_template(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleSwapStates.choosing_template)
+async def schedule_swap_template_wrong_input(message: Message) -> None:
+    await message.answer("Выберите вид расписания кнопкой выше. Или отправьте /cancel для отмены.")
+
+
 @router.message(ScheduleSwapStates.waiting_schedule_txt, F.document)
 async def receive_schedule_swap_txt(message: Message, state: FSMContext) -> None:
     document = message.document
@@ -761,8 +804,10 @@ async def receive_schedule_swap_txt(message: Message, state: FSMContext) -> None
 
     data = await state.get_data()
     html_text = data["html_text"]
-    region = tuple(data["region"])  # (start, end, element)
-    element = region[2]
+    region = tuple(data["region"])  # (start, end, element) — element здесь не используется:
+    # вид расписания СММ выбирает явно (schedule_template, choosing_template), а не
+    # по тому, что было в заменяемом регионе.
+    element = data["schedule_template"]
 
     file = await message.bot.get_file(document.file_id)
     buf = await message.bot.download_file(file.file_path)
@@ -860,12 +905,37 @@ async def receive_schedule_add_html(message: Message, state: FSMContext) -> None
         return
 
     await state.update_data(html_text=html_text)
-    await state.set_state(ScheduleAddStates.waiting_schedule_txt)
+    await _ask_schedule_add_template(message, state, "Формат подходит: это полный UniSender-шаблон, собранный из блоков, без расписания.")
+
+
+async def _ask_schedule_add_template(message: Message, state: FSMContext, intro: str) -> None:
+    options = gensvc.schedule_template_options()
+    await state.update_data(_schedule_add_template_list=options)
+    await state.set_state(ScheduleAddStates.choosing_template)
+    buttons = [
+        InlineKeyboardButton(text=str(i + 1), callback_data=f"schedadd:tpl:{i}")
+        for i in range(len(options))
+    ]
+    await message.answer(intro)
     await message.answer(
-        "Формат подходит: это полный UniSender-шаблон, собранный из блоков, без расписания.\n\n"
+        "Выберите вид расписания (SCHEDULE.txt несёт только список событий, не визуальный вариант):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]),
+    )
+
+
+@router.callback_query(ScheduleAddStates.choosing_template, F.data.startswith("schedadd:tpl:"))
+async def choose_schedule_add_template(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[-1])
+    element = data["_schedule_add_template_list"][idx]
+    await state.update_data(schedule_template=element)
+    await state.set_state(ScheduleAddStates.waiting_schedule_txt)
+    await callback.message.edit_text(f"Расписание: {element}")
+    await callback.message.answer(
         "Пришлите файл SCHEDULE.txt документом.",
         reply_markup=cancel_keyboard,
     )
+    await callback.answer()
 
 
 @router.message(ScheduleAddStates.waiting_html, F.text == "Отмена")
@@ -880,6 +950,18 @@ async def schedule_add_wrong_input(message: Message) -> None:
     await message.answer("Ожидаю HTML-файл документом. Или отправьте /cancel для отмены.")
 
 
+@router.message(ScheduleAddStates.choosing_template, F.text == "Отмена")
+@router.message(ScheduleAddStates.choosing_template, Command("cancel"))
+async def cancel_schedule_add_template(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=main_menu_keyboard)
+
+
+@router.message(ScheduleAddStates.choosing_template)
+async def schedule_add_template_wrong_input(message: Message) -> None:
+    await message.answer("Выберите вид расписания кнопкой выше. Или отправьте /cancel для отмены.")
+
+
 @router.message(ScheduleAddStates.waiting_schedule_txt, F.document)
 async def receive_schedule_add_txt(message: Message, state: FSMContext) -> None:
     document = message.document
@@ -890,6 +972,7 @@ async def receive_schedule_add_txt(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     html_text = data["html_text"]
+    element = data["schedule_template"]
 
     file = await message.bot.get_file(document.file_id)
     buf = await message.bot.download_file(file.file_path)
@@ -897,7 +980,7 @@ async def receive_schedule_add_txt(message: Message, state: FSMContext) -> None:
 
     await message.answer("Строю расписание...")
     try:
-        new_blocks = await gensvc.build_schedule_replacement_blocks(content)
+        new_blocks = await gensvc.build_schedule_replacement_blocks(content, element)
     except gensvc.GenerationServiceError as exc:
         await message.answer(
             f"Не удалось построить расписание:\n{exc}\n\nПришлите файл ещё раз или отправьте /cancel."
