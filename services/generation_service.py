@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime
@@ -224,6 +225,74 @@ async def run_qa_on_html(html_text: str) -> dict:
     return await asyncio.to_thread(_run)
 
 
+# --- Fallback-распознавание блоков без letteros-element/letteros-module ----------
+#
+# UniSender при экспорте письма из визуального редактора (после того как менеджер
+# отредактировал/пересобрал письмо там) стирает все кастомные атрибуты на <tr>,
+# включая em="block"/class="em-structure"/letteros-element/letteros-module — то
+# есть именно то, на чём работает qa.find_components(). HTML-структура (теги,
+# вложенность, inline-стили) при этом не меняется. Ниже — распознавание ТОЛЬКО
+# того, что нужно сценариям «заменить расписание»/«добавить расписание» в уже
+# готовое письмо: где проходят границы top-level блоков и какие из них —
+# Schedule (остальные блоки письма — Шапка/Авторы/Подвал и т.п. — для этих
+# сценариев не важны и не распознаются).
+
+_ENVELOPE_TABLE_RE = re.compile(r'<table[^>]*max-width:\s*\d{3}\s*px[^>]*>', re.IGNORECASE)
+_TOP_LEVEL_TR_RE = re.compile(r"<tr\b[^>]*>", re.IGNORECASE)
+
+# Признак Schedule-блока — время события в формате HH:MM (у каждого события
+# письма, независимо от визуального варианта верстки: и у card-стиля с кнопкой
+# "ЗАПИСАТЬСЯ" у каждого события, и у текущего list-стиля с общим заголовком
+# даты и единой кнопкой "ПОЛНОЕ РАСПИСАНИЕ И БИЛЕТЫ" в конце — визуал Schedule
+# менялся, но время события в этом формате есть всегда). Текстовые CTA-маркеры
+# ("ЗАПИСАТЬСЯ"/"ПОЛНОЕ РАСПИСАНИЕ...") таким свойством не обладают — они
+# привязаны к конкретному визуальному варианту и могут поменяться на следующий.
+# В остальных модулях письма (Шапка/Подвал/Контент/Кнопки) этот паттерн не
+# встречается — проверено на реальных письмах филиала (см. MGI_EDITOR_TEMPLATE).
+_SCHEDULE_TIME_RE = re.compile(r"\b\d{2}:\d{2}\b")
+_SCHEDULE_TIME_MIN_MATCHES = 1
+
+# Порог для «блок похож на тонкий разделитель между Schedule-блоками» (тот же смысл,
+# что у letteros-module="Разделители" в основном алгоритме) — canonical-разделители
+# (Разделители/Отступ между блоками 16px, /Линия) занимают сотни байт, Schedule-блок
+# с хотя бы одним событием — тысячи. Эвристика, а не точное сопоставление с canonical.
+_DIVIDER_LIKE_MAX_LEN = 1000
+
+
+def _fallback_top_level_blocks(html_text: str) -> list:
+    """Границы top-level блоков письма без опоры на letteros-атрибуты — находит
+    «конвертную» table с max-width (стандартная обёртка UniSender-письма на ~600-660px)
+    и перечисляет её непосредственных <tr>-детей, используя тот же балансировщик
+    вложенных <tr>, что и у canonical-парсера (generation._scan_balanced_tr_end).
+    Возвращает [] если конверт не найден (не похоже на UniSender-письмо)."""
+    m = _ENVELOPE_TABLE_RE.search(html_text)
+    if m is None:
+        return []
+    pos = m.end()
+    blocks = []
+    while True:
+        tr_m = _TOP_LEVEL_TR_RE.search(html_text, pos)
+        if tr_m is None:
+            break
+        start = tr_m.start()
+        try:
+            end = generation._scan_balanced_tr_end(html_text, start)
+        except generation.GenerationError:
+            break
+        blocks.append((start, end))
+        pos = end
+    return blocks
+
+
+def _is_fallback_schedule_block(html_text: str, start: int, end: int) -> bool:
+    fragment = html_text[start:end]
+    return len(_SCHEDULE_TIME_RE.findall(fragment)) >= _SCHEDULE_TIME_MIN_MATCHES
+
+
+def _is_fallback_divider_like_block(html_text: str, start: int, end: int) -> bool:
+    return (end - start) <= _DIVIDER_LIKE_MAX_LEN and not _is_fallback_schedule_block(html_text, start, end)
+
+
 def is_full_unisender_template(html_text: str) -> bool:
     """Входная проверка для сценария «заменить Schedule в загруженном письме» (этап 1):
     отличает UniSender-шаблон, собранный из распознаваемых UniSender-блоков, от
@@ -236,7 +305,14 @@ def is_full_unisender_template(html_text: str) -> bool:
     - документ целиком, не фрагмент — есть тег <html>;
     - есть <tr em="block" ... letteros-element="..." letteros-module="...">;
     - границы блока корректно выделяются с учётом вложенных <tr> (тот же парсер,
-      что и у QA: qa.find_components -> generation._scan_balanced_tr_end)."""
+      что и у QA: qa.find_components -> generation._scan_balanced_tr_end).
+
+    Fallback (см. модульный комментарий выше «Fallback-распознавание...»): если
+    letteros-атрибуты стёрты экспортом UniSender, но в письме есть стандартная
+    «конвертная» table (max-width ~600-660px) с несколькими top-level <tr>-блоками,
+    письмо тоже считается полноценным UniSender-шаблоном — этого достаточно для
+    find_schedule_region/append_schedule_blocks ниже, которые сами не зависят от
+    letteros-атрибутов."""
     if "<html" not in html_text.lower():
         return False
     components = qa.find_components(html_text)
@@ -244,7 +320,7 @@ def is_full_unisender_template(html_text: str) -> bool:
         tag_end = html_text.find(">", start)
         if tag_end != -1 and 'em="block"' in html_text[start:tag_end]:
             return True
-    return False
+    return len(_fallback_top_level_blocks(html_text)) >= 3
 
 
 _SCHEDULE_MODULE = "Мероприятия"
@@ -274,7 +350,10 @@ def schedule_blocks_status(html_text: str) -> str:
         if module == _SCHEDULE_MODULE and element.startswith("Расписание")
     ]
     if not schedule_idx:
-        return "missing"
+        # letteros-разметка стёрта экспортом UniSender (или её нет вовсе) — см.
+        # модульный комментарий «Fallback-распознавание...» и _fallback_find_schedule().
+        status, _region = _fallback_find_schedule(html_text)
+        return status
 
     first_idx, last_idx = schedule_idx[0], schedule_idx[-1]
     for i in range(first_idx, last_idx + 1):
@@ -284,6 +363,38 @@ def schedule_blocks_status(html_text: str) -> str:
         if module != _DIVIDER_MODULE:
             return "not_contiguous"
     return "ok"
+
+
+def _fallback_find_schedule(html_text: str):
+    """Fallback-версия поиска Schedule-региона без опоры на letteros-атрибуты (см.
+    модульный комментарий «Fallback-распознавание...» выше) — используется
+    schedule_blocks_status()/find_schedule_region() только когда letteros-разметка
+    в письме отсутствует (включая случай, когда в письме вообще нет ни одного
+    canonical-компонента с маркерами). Возвращает (status, region) в том же
+    формате, что и find_schedule_region()."""
+    blocks = _fallback_top_level_blocks(html_text)
+    schedule_idx = [
+        i for i, (start, end) in enumerate(blocks)
+        if _is_fallback_schedule_block(html_text, start, end)
+    ]
+    if not schedule_idx:
+        return "missing", None
+
+    first_idx, last_idx = schedule_idx[0], schedule_idx[-1]
+    for i in range(first_idx, last_idx + 1):
+        if i in schedule_idx:
+            continue
+        start, end = blocks[i]
+        if not _is_fallback_divider_like_block(html_text, start, end):
+            return "not_contiguous", None
+
+    region_start = blocks[first_idx][0]
+    region_end = blocks[last_idx][1]
+    # element=None — generation.build_schedule_blocks() сама берёт canonical-вариант
+    # по умолчанию (см. docstring build_schedule_replacement_blocks ниже); без
+    # letteros-element узнать, какой именно вариант "Расписание N" был в письме,
+    # невозможно, и это не нужно — старый регион целиком заменяется новым.
+    return "ok", (region_start, region_end, None)
 
 
 def find_schedule_region(html_text: str):
@@ -309,7 +420,7 @@ def find_schedule_region(html_text: str):
         if module == _SCHEDULE_MODULE and element.startswith("Расписание")
     ]
     if not schedule_idx:
-        return "missing", None
+        return _fallback_find_schedule(html_text)
 
     first_idx, last_idx = schedule_idx[0], schedule_idx[-1]
     for i in range(first_idx, last_idx + 1):
@@ -376,9 +487,22 @@ def append_schedule_blocks(html_text: str, new_blocks: list) -> str:
     список блоков, что у is_full_unisender_template/schedule_blocks_status:
     qa.find_components). Порядок уже существующих в письме блоков не меняется;
     UniSender позволяет пользователю после импорта перетащить блоки в нужное
-    место самостоятельно — бот порядок не переставляет."""
+    место самостоятельно — бот порядок не переставляет.
+
+    Fallback (см. модульный комментарий «Fallback-распознавание...» выше): если
+    letteros-разметка стёрта экспортом UniSender, qa.find_components() не найдёт
+    ни одного компонента — тогда конец последнего top-level блока берётся через
+    _fallback_top_level_blocks()."""
     components = qa.find_components(html_text)
-    insert_at = components[-1][3]
+    if components:
+        insert_at = components[-1][3]
+    else:
+        blocks = _fallback_top_level_blocks(html_text)
+        if not blocks:
+            raise GenerationServiceError(
+                "не удалось найти ни одного UniSender-блока в письме, чтобы вставить расписание."
+            )
+        insert_at = blocks[-1][1]
     return html_text[:insert_at] + "\n" + "\n".join(new_blocks) + html_text[insert_at:]
 
 
