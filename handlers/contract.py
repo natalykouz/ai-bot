@@ -3,7 +3,9 @@
 Использует FSM для отслеживания режима ожидания ввода от пользователя.
 """
 
+import html
 import io
+import logging
 import os
 from typing import Any, Awaitable, Callable, Dict, Union
 
@@ -12,13 +14,19 @@ from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,
+    BufferedInputFile, Message, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, TelegramObject,
 )
 
 from services.openai_service import analyze_contract
 from services.html_service import analyze_html
 from services import auth_service
+from utils.telegram_send import send_long_text
+
+logger = logging.getLogger(__name__)
+
+# Порог, после которого результат HTML-форматирования отправляется файлом, а не сообщением
+HTML_INLINE_LIMIT = 3500
 
 # Клавиатура главного меню
 keyboard = ReplyKeyboardMarkup(
@@ -95,6 +103,40 @@ def get_model_keyboard() -> InlineKeyboardMarkup:
             callback_data="model_gpt4o",
         )],
     ])
+
+
+async def _fail_analysis(answerable, state: FSMContext, context: str) -> None:
+    """
+    Общая обработка ошибок анализа/парсинга: логирует с traceback,
+    сбрасывает состояние и возвращает пользователя в главное меню.
+    """
+    logger.exception("Ошибка при %s", context)
+    await state.clear()
+    await answerable.answer(
+        "Не удалось выполнить проверку, попробуйте ещё раз позже.",
+        reply_markup=keyboard,
+    )
+
+
+async def _send_html_result(answerable, result: str, truncated: bool) -> None:
+    """
+    Отправляет результат HTML-форматирования: короткий — в <pre> с parse_mode=HTML,
+    длинный — файлом result.html. В обоих случаях добавляет предупреждение,
+    если ответ модели был обрезан по лимиту токенов.
+    """
+    if len(result) <= HTML_INLINE_LIMIT:
+        text = f"<pre>{html.escape(result)}</pre>"
+        if truncated:
+            text += "\n\n⚠️ Ответ получился слишком длинным и был обрезан."
+        await answerable.answer(text, parse_mode="HTML")
+    else:
+        caption = "Результат форматирования (слишком длинный для сообщения)"
+        if truncated:
+            caption += "\n⚠️ Ответ получился слишком длинным и был обрезан."
+        await answerable.answer_document(
+            BufferedInputFile(result.encode("utf-8"), filename="result.html"),
+            caption=caption,
+        )
 
 
 ADMIN_INFO_TEXT = (
@@ -247,8 +289,18 @@ async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None
             return
 
         await message.answer("Форматирую текст, подождите...")
-        result = await analyze_html(html_text)
-        await message.answer(f"```\n{result}\n```", parse_mode="MarkdownV2")
+        try:
+            result, truncated = await analyze_html(html_text)
+        except Exception:
+            await _fail_analysis(message, state, "форматировании HTML из файла")
+            return
+
+        try:
+            await _send_html_result(message, result, truncated)
+        except Exception:
+            logger.exception("Ошибка при отправке результата HTML-форматирования")
+            await message.answer("Не удалось отправить результат, попробуйте ещё раз позже.")
+
         await state.clear()
         await message.answer(
             "Готово. Чтобы отформатировать другую страницу — выберите тип проверки.",
@@ -257,26 +309,30 @@ async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None
         return
 
     # Режим договора — извлекаем текст в зависимости от расширения
-    if ext == "txt":
-        # Читаем байты и декодируем как UTF-8
-        contract_text = buf.read().decode("utf-8", errors="replace")
+    try:
+        if ext == "txt":
+            # Читаем байты и декодируем как UTF-8
+            contract_text = buf.read().decode("utf-8", errors="replace")
 
-    elif ext == "docx":
-        # Парсим .docx через python-docx, объединяем все абзацы
-        from docx import Document as DocxDocument
-        doc = DocxDocument(buf)
-        contract_text = "\n".join(para.text for para in doc.paragraphs)
+        elif ext == "docx":
+            # Парсим .docx через python-docx, объединяем все абзацы
+            from docx import Document as DocxDocument
+            doc = DocxDocument(buf)
+            contract_text = "\n".join(para.text for para in doc.paragraphs)
 
-    else:  # pdf
-        # Парсим .pdf через pdfplumber, собираем текст со всех страниц
-        import pdfplumber
-        pages_text = []
-        with pdfplumber.open(buf) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    pages_text.append(text)
-        contract_text = "\n".join(pages_text)
+        else:  # pdf
+            # Парсим .pdf через pdfplumber, собираем текст со всех страниц
+            import pdfplumber
+            pages_text = []
+            with pdfplumber.open(buf) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if text:
+                        pages_text.append(text)
+            contract_text = "\n".join(pages_text)
+    except Exception:
+        await _fail_analysis(message, state, f"парсинге файла .{ext}")
+        return
 
     if not contract_text.strip():
         await message.answer("Не удалось извлечь текст из файла. Попробуйте другой файл.")
@@ -479,8 +535,19 @@ async def handle_model_choice(callback: CallbackQuery, state: FSMContext) -> Non
     # Редактируем сообщение с клавиатурой — убираем кнопки и показываем статус
     await callback.message.edit_text("Анализирую договор, подождите...")
 
-    result = await analyze_contract(text, model=model)
-    await callback.message.answer(result)
+    try:
+        result, truncated = await analyze_contract(text, model=model)
+    except Exception:
+        await _fail_analysis(callback.message, state, "анализе договора")
+        return
+
+    try:
+        # Без parse_mode: символы <, >, & в тексте договора не должны ломать отправку
+        await send_long_text(callback.message, result, parse_mode=None, truncated=truncated)
+    except Exception:
+        logger.exception("Ошибка при отправке результата анализа договора")
+        await callback.message.answer("Не удалось отправить результат, попробуйте ещё раз позже.")
+
     await state.clear()
     await callback.message.answer(
         "Готово. Чтобы проверить исправленную версию или другой договор — выберите тип проверки.",
@@ -507,8 +574,18 @@ async def handle_text(message: Message, state: FSMContext) -> None:
     if current_state == UserStates.waiting_html.state:
         # Режим форматирования HTML
         await message.answer("Форматирую текст, подождите...")
-        result = await analyze_html(message.text)
-        await message.answer(f"```\n{result}\n```", parse_mode="MarkdownV2")
+        try:
+            result, truncated = await analyze_html(message.text)
+        except Exception:
+            await _fail_analysis(message, state, "форматировании HTML из текста")
+            return
+
+        try:
+            await _send_html_result(message, result, truncated)
+        except Exception:
+            logger.exception("Ошибка при отправке результата HTML-форматирования")
+            await message.answer("Не удалось отправить результат, попробуйте ещё раз позже.")
+
         await message.answer(
             "Готово. Чтобы отформатировать другую страницу — выберите тип проверки.",
             reply_markup=keyboard,
