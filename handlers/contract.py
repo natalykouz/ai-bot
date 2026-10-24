@@ -250,6 +250,10 @@ async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None
         result = await analyze_html(html_text)
         await message.answer(f"```\n{result}\n```", parse_mode="MarkdownV2")
         await state.clear()
+        await message.answer(
+            "Готово. Чтобы отформатировать другую страницу — выберите тип проверки.",
+            reply_markup=keyboard,
+        )
         return
 
     # Режим договора — извлекаем текст в зависимости от расширения
@@ -478,6 +482,10 @@ async def handle_model_choice(callback: CallbackQuery, state: FSMContext) -> Non
     result = await analyze_contract(text, model=model)
     await callback.message.answer(result)
     await state.clear()
+    await callback.message.answer(
+        "Готово. Чтобы проверить исправленную версию или другой договор — выберите тип проверки.",
+        reply_markup=keyboard,
+    )
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -501,6 +509,10 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         await message.answer("Форматирую текст, подождите...")
         result = await analyze_html(message.text)
         await message.answer(f"```\n{result}\n```", parse_mode="MarkdownV2")
+        await message.answer(
+            "Готово. Чтобы отформатировать другую страницу — выберите тип проверки.",
+            reply_markup=keyboard,
+        )
     else:
         # Режим проверки договора — сохраняем текст и предлагаем выбрать модель
         await state.update_data(contract_text=message.text)
