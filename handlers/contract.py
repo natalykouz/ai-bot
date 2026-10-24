@@ -191,28 +191,41 @@ async def btn_cancel(message: Message, state: FSMContext) -> None:
 @router.message(F.document)
 async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None:
     """
-    Обрабатывает полученный документ.
-    Если активно состояние waiting_new_prompt — передаёт управление handle_new_prompt.
-    Иначе обрабатывает как договор:
-    - .txt  — читает как текст (UTF-8)
-    - .docx — парсит через python-docx
-    - .pdf  — парсит через pdfplumber
-    - другой формат — сообщает об ошибке
+    Обрабатывает полученный документ в зависимости от текущего состояния:
+    - waiting_new_prompt — передаёт управление handle_new_prompt (админская загрузка промпта)
+    - waiting_html       — принимает .html/.htm/.txt и анализирует через analyze_html()
+    - waiting_contract   — принимает .txt/.docx/.pdf и анализирует через analyze_contract()
+    - без состояния      — просит сначала выбрать режим проверки
     """
-    # Если ждём новый промпт — передаём управление соответствующему хендлеру
     current_state = await state.get_state()
+
     if current_state == UserStates.waiting_new_prompt.state:
         await handle_new_prompt(message, state, bot)
         return
 
+    if current_state is None:
+        await message.answer("Сначала выберите тип проверки:", reply_markup=keyboard)
+        return
+
     document = message.document
     file_name = document.file_name or ""
-
-    # Определяем расширение файла в нижнем регистре
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 
-    if ext not in ("txt", "docx", "pdf"):
-        await message.answer("Поддерживаются только .txt, .docx, .pdf")
+    is_html_mode = current_state == UserStates.waiting_html.state
+
+    if is_html_mode:
+        allowed_exts = ("html", "htm", "txt")
+    else:
+        allowed_exts = ("txt", "docx", "pdf")
+
+    if ext not in allowed_exts:
+        if is_html_mode:
+            await message.answer(
+                "Вы выбрали проверку HTML. Пришлите файл .html/.txt или вставьте код текстом. "
+                "Если нужно проверить договор — нажмите «Отмена» и выберите проверку договора."
+            )
+        else:
+            await message.answer("Поддерживаются только .txt, .docx, .pdf")
         return
 
     # Скачиваем файл в оперативную память
@@ -221,7 +234,25 @@ async def handle_document(message: Message, state: FSMContext, bot: Bot) -> None
     await message.bot.download_file(file.file_path, destination=buf)
     buf.seek(0)
 
-    # Извлекаем текст в зависимости от расширения
+    if is_html_mode:
+        # .html/.htm/.txt — читаем как текст (UTF-8, с fallback на cp1251)
+        raw = buf.read()
+        try:
+            html_text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            html_text = raw.decode("cp1251", errors="replace")
+
+        if not html_text.strip():
+            await message.answer("Не удалось извлечь текст из файла. Попробуйте другой файл.")
+            return
+
+        await message.answer("Форматирую текст, подождите...")
+        result = await analyze_html(html_text)
+        await message.answer(f"```\n{result}\n```", parse_mode="MarkdownV2")
+        await state.clear()
+        return
+
+    # Режим договора — извлекаем текст в зависимости от расширения
     if ext == "txt":
         # Читаем байты и декодируем как UTF-8
         contract_text = buf.read().decode("utf-8", errors="replace")
@@ -453,10 +484,16 @@ async def handle_model_choice(callback: CallbackQuery, state: FSMContext) -> Non
 async def handle_text(message: Message, state: FSMContext) -> None:
     """
     Обрабатывает текстовое сообщение в зависимости от текущего состояния:
-    - waiting_html — форматирует текст в HTML через analyze_html()
-    - waiting_contract или без состояния — проверяет как договор через analyze_contract()
+    - waiting_html     — форматирует текст в HTML через analyze_html()
+    - waiting_contract — проверяет как договор через analyze_contract()
+    - без состояния    — просит сначала выбрать режим проверки
     """
     current_state = await state.get_state()
+
+    if current_state is None:
+        await message.answer("Сначала выберите тип проверки:", reply_markup=keyboard)
+        return
+
     await state.clear()
 
     if current_state == UserStates.waiting_html.state:
